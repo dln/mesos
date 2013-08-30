@@ -11,10 +11,7 @@ respawn limit 50 5
 limit nofile 8192 8192
 
 script
-  [ -r /etc/default/mesos ] && . /etc/default/mesos
-  exec /usr/sbin/mesos-slave \
-    --quiet \
-    --conf=$MESOS_CONFIG_DIR \
-    --port=$MESOS_SLAVE_PORT
+  [ -r /etc/default/mesos-slave ] && . /etc/default/mesos-slave
+  exec /usr/sbin/mesos-slave
 end script
 

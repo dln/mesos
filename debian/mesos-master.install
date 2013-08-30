@@ -1,1 +1,2 @@
+debian/default/mesos-master /etc/default
 /usr/sbin/mesos-master /usr/sbin

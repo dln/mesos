@@ -1,1 +1,2 @@
+debian/default/mesos-slave /etc/default
 debian/tmp/usr/sbin/mesos-slave

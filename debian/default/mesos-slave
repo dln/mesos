@@ -1,0 +1,20 @@
+export MESOS_port=5051
+export MESOS_master=localhost:5050
+export MESOS_log_dir=/var/log/mesos/slave
+export MESOS_quiet=true
+export MESOS_work_dir=/var/lib/mesos/work
+export MESOS_frameworks_home=/var/lib/mesos/frameworks
+export MESOS_launcher_dir=/usr/lib/mesos
+
+
+#export MESOS_ip=$HOST
+#export MESOS_resources="cpus:8.0;memory:4096;disk:20480;ports:[30000-50000]"
+#export MESOS_attributes="rack:abc;kernel:2.6.44"
+#export MESOS_isolation=cgroups
+#export MESOS_cgroups_enable_cfs=true
+#export MESOS_hadoop_home=/usr/lib/hadoop
+
+# See http://google-glog.googlecode.com/svn/trunk/doc/glog.html#flags
+export GLOG_minloglevel=0  # 0=INFO, 1=WARNING, 2=ERROR, 3=FATAL
+export GLOG_v=0            # Show all VLOG(m) messages where m <= GLOG_v
+export GLOG_vmodule=""     # Per-module verbose level
