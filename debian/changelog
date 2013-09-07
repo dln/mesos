@@ -1,3 +1,9 @@
+mesos (0.14.0~rc3-1) precise; urgency=low
+
+  * Update to 0.14.0-rc3
+
+ -- Daniel Lundin <dln@magine.com>  Sat, 07 Sep 2013 21:26:26 +0200
+
 mesos (0.14.0~rc2-1) precise; urgency=low
 
   * Update to 0.14.0-rc2
