@@ -1,3 +1,9 @@
+mesos (0.14.2~rc2-1ubuntu1) precise; urgency=low
+
+  * Update to 0.14.2-rc2
+
+ -- Daniel Lundin <dln@magine.com>  Thu, 07 Nov 2013 15:00:49 +0100
+
 mesos (0.14.0~rc3-1) precise; urgency=low
 
   * Update to 0.14.0-rc3
