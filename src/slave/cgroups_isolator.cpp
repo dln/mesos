@@ -772,17 +772,35 @@ Future<ResourceStatistics> CgroupsIsolator::usage(
         (double) stat.get()["system"] / (double) ticks);
   }
 
-  stat = cgroups::stat(hierarchy, info->name(), "memory.stat");
+  // The rss from memory.stat is wrong in two dimensions:
+  //   1. It does not include child cgroups.
+  //   2. It does not include any file backed pages.
+  Try<Bytes> usage = cgroups::memory::usage_in_bytes(hierarchy, info->name());
+  if (usage.isError()) {
+    return Future<ResourceStatistics>::failed(
+        "Failed to parse memory.usage_in_bytes: " + usage.error());
+  }
 
+  // TODO(bmahler): Add namespacing to cgroups to enforce the expected
+  // structure, e.g, cgroups::memory::stat.
+  result.set_mem_rss_bytes(usage.get().bytes());
+
+  stat = cgroups::stat(hierarchy, info->name(), "memory.stat");
   if (stat.isError()) {
     return Future<ResourceStatistics>::failed(
         "Failed to read memory.stat: " + stat.error());
   }
 
-  // TODO(bmahler): Add namespacing to cgroups to enforce the expected
-  // structure, e.g, cgroups::memory::stat.
-  if (stat.get().contains("rss")) {
-    result.set_mem_rss_bytes(stat.get()["rss"]);
+  if (stat.get().contains("total_cache")) {
+    result.set_mem_file_bytes(stat.get()["total_cache"]);
+  }
+
+  if (stat.get().contains("total_rss")) {
+    result.set_mem_anon_bytes(stat.get()["total_rss"]);
+  }
+
+  if (stat.get().contains("total_mapped_file")) {
+    result.set_mem_mapped_file_bytes(stat.get()["total_mapped_file"]);
   }
 
   // Add the cpu.stat information.
@@ -1203,9 +1221,12 @@ void CgroupsIsolator::oom(
     return;
   }
 
-  // If killed is set, the OOM notifier will be discarded in oomWaited.
-  // Therefore, we should not be able to reach this point.
-  CHECK(!info->killed) << "OOM detected for an already killed executor";
+  // It's possible for an executor to OOM right as it was being
+  // killed, ignore this case.
+  if (info->killed) {
+    LOG(INFO) << "OOM detected for an already killed executor";
+    return;
+  }
 
   LOG(INFO) << "OOM detected for executor " << executorId
             << " of framework " << frameworkId
