@@ -1,0 +1,47 @@
+mesos (0.16.0~rc2-1magine1ubuntu1) precise; urgency=low
+
+  * Update to 0.16.0-rc2
+
+ -- Daniel Lundin <dln@magine.com>  Wed, 18 Dec 2013 11:53:11 +0100
+
+mesos (0.15.0~rc4-1magine1) precise; urgency=low
+
+  * Update to 0.15.0-rc4
+
+ -- Daniel Lundin <dln@magine.com>  Mon, 09 Dec 2013 22:45:13 +0100
+
+mesos (0.15.0~rc3-1magine1) precise; urgency=low
+
+  * Update to 0.15.0-rc3
+
+ -- Daniel Lundin <dln@magine.com>  Sat, 07 Dec 2013 21:46:39 +0100
+
+mesos (0.14.2~rc2-1ubuntu1) precise; urgency=low
+
+  * Update to 0.14.2-rc2
+
+ -- Daniel Lundin <dln@magine.com>  Thu, 07 Nov 2013 15:00:49 +0100
+
+mesos (0.14.0~rc3-1) precise; urgency=low
+
+  * Update to 0.14.0-rc3
+
+ -- Daniel Lundin <dln@magine.com>  Sat, 07 Sep 2013 21:26:26 +0200
+
+mesos (0.14.0~rc2-1) precise; urgency=low
+
+  * Update to 0.14.0-rc2
+
+ -- Daniel Lundin <dln@magine.com>  Fri, 30 Aug 2013 20:02:21 +0200
+
+mesos (0.13.0~rc7-1) precise; urgency=low
+
+  * Update to 0.13.0-rc7
+
+ -- Daniel Lundin <dln@magine.com>  Mon, 26 Aug 2013 13:52:38 +0200
+
+mesos (0.12.0-1) unstable; urgency=low
+
+  * Initial package.
+
+ -- Daniel Lundin <dln@eintr.org>  Thu, 11 Jul 2013 15:20:25 +0200
