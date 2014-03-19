@@ -1,3 +1,21 @@
+mesos (0.18.0~rc4-1magine1) precise; urgency=low
+
+  * Update to 0.18.0-rc4
+
+ -- Daniel Lundin <dln@magine.com>  Wed, 19 Mar 2014 11:15:30 +0100
+
+mesos (0.18.0~rc3-1magine4) precise; urgency=low
+
+  * add python-mesos deps to mesos-bin
+
+ -- Daniel Lundin <dln@magine.com>  Sun, 16 Mar 2014 21:58:13 +0100
+
+mesos (0.18.0~rc3-1magine3) precise; urgency=low
+
+  * python-mesos: link with libsnappy
+
+ -- Daniel Lundin <dln@magine.com>  Sun, 16 Mar 2014 21:31:46 +0100
+
 mesos (0.18.0~rc3-1magine2) precise; urgency=low
 
   * Update protobuf deps to >= 2.5.0
