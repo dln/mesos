@@ -94,6 +94,8 @@ if 'LIBS' in os.environ:
   for library in os.environ['LIBS'].split():
     EXTRA_LINK_ARGS.append(library)
 
+EXTRA_LINK_ARGS.append('-lsnappy') # XXX: dln
+
 DEPENDS = [
   os.path.join(abs_top_srcdir, 'src', 'python', source)
     for source in SOURCES
