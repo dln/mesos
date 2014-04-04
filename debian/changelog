@@ -1,3 +1,15 @@
+mesos (0.18.0~rc6-1magine1) precise; urgency=low
+
+  * Update to 0.18.0-rc6
+
+ -- Daniel Lundin <dln@magine.com>  Fri, 04 Apr 2014 11:24:30 +0200
+
+mesos (0.18.0~rc5-1magine1) precise; urgency=low
+
+  * Update to 0.18.0-rc5
+
+ -- Daniel Lundin <dln@magine.com>  Wed, 26 Mar 2014 17:00:13 +0100
+
 mesos (0.18.0~rc4-1magine1) precise; urgency=low
 
   * Update to 0.18.0-rc4
