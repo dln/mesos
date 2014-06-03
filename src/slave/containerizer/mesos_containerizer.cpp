@@ -64,7 +64,8 @@ std::string buildCommand(
   string uris = "";
   foreach (const CommandInfo::URI& uri, commandInfo.uris()) {
     uris += uri.value() + "+" +
-            (uri.has_executable() && uri.executable() ? "1" : "0");
+            (uri.has_executable() && uri.executable() ? "1" : "0") +
+            (uri.extract() ? "X" : "N");
     uris += " ";
   }
   // Remove extra space at the end.
@@ -165,6 +166,12 @@ Future<Containerizer::Termination> MesosContainerizer::wait(
 void MesosContainerizer::destroy(const ContainerID& containerId)
 {
   dispatch(process, &MesosContainerizerProcess::destroy, containerId);
+}
+
+
+Future<hashset<ContainerID> > MesosContainerizer::containers()
+{
+  return dispatch(process, &MesosContainerizerProcess::containers);
 }
 
 
@@ -711,7 +718,10 @@ Future<Nothing> MesosContainerizerProcess::update(
     const ContainerID& containerId,
     const Resources& _resources)
 {
-  if (!resources.contains(containerId)) {
+  // The resources hashmap won't initially contain the container's resources
+  // after recovery so we must check the promises hashmap (which is set during
+  // recovery).
+  if (!promises.contains(containerId)) {
     return Failure("Unknown container: " + stringify(containerId));
   }
 
@@ -919,6 +929,13 @@ void MesosContainerizerProcess::limited(
   // The container has been affected by the limitation so destroy it.
   destroy(containerId);
 }
+
+
+Future<hashset<ContainerID> > MesosContainerizerProcess::containers()
+{
+  return promises.keys();
+}
+
 
 } // namespace slave {
 } // namespace internal {

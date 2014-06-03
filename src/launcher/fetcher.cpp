@@ -34,7 +34,7 @@ using std::string;
 // Try to extract filename into directory. If filename is recognized as an
 // archive it will be extracted and true returned; if not recognized then false
 // will be returned. An Error is returned if the extraction command fails.
-Try<Nothing> extract(const string& filename, const string& directory)
+Try<bool> extract(const string& filename, const string& directory)
 {
   string command;
   // Extract any .tgz, tar.gz, tar.bz2 or zip files.
@@ -48,7 +48,7 @@ Try<Nothing> extract(const string& filename, const string& directory)
   } else if (strings::endsWith(filename, ".zip")) {
     command = "unzip -d '" + directory + "'";
   } else {
-    return Error("Could not extract file with unrecognized extension");
+    return false;
   }
 
   command += " '" + filename + "'";
@@ -61,7 +61,7 @@ Try<Nothing> extract(const string& filename, const string& directory)
   LOG(INFO) << "Extracted resource '" << filename
             << "' into '" << directory << "'";
 
-  return Nothing();
+  return true;
 }
 
 
@@ -180,14 +180,19 @@ int main(int argc, char* argv[])
   // Construct URIs from the encoded environment string.
   const std::string& uris = os::getenv("MESOS_EXECUTOR_URIS");
   foreach (const std::string& token, strings::tokenize(uris, " ")) {
-    // Delimiter between URI and execute permission.
+    // Delimiter between URI, execute permission and extract options
+    // Expected format: {URI}+[01][XN]
+    //  {URI} - The actual URI for the asset to fetch
+    //  [01]  - 1 if the execute permission should be set else 0
+    //  [XN]  - X if we should extract the URI (if it's compressed) else N
     size_t pos = token.rfind("+");
     CHECK(pos != std::string::npos)
       << "Invalid executor uri token in env " << token;
 
     CommandInfo::URI uri;
     uri.set_value(token.substr(0, pos));
-    uri.set_executable(token.substr(pos + 1) == "1");
+    uri.set_executable(token.substr(pos + 1, 1) == "1");
+    uri.set_extract(token.substr(pos + 2, 1) == "X");
 
     commandInfo.add_uris()->MergeFrom(uri);
   }
@@ -219,14 +224,16 @@ int main(int argc, char* argv[])
       if (!chmodded) {
         EXIT(1) << "Failed to chmod: " << fetched.get();
       }
-    } else {
+    } else if (uri.extract()) {
       //TODO(idownes): Consider removing the archive once extracted.
       // Try to extract the file if it's recognized as an archive.
-      Try<Nothing> extracted = extract(fetched.get(), directory);
+      Try<bool> extracted = extract(fetched.get(), directory);
       if (extracted.isError()) {
         EXIT(1) << "Failed to extract "
                 << fetched.get() << ":" << extracted.error();
       }
+    } else {
+      LOG(INFO) << "Skipped extracting path '" << fetched.get() << "'";
     }
 
     // Recursively chown the directory if a user is provided.
