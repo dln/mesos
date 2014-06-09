@@ -27,11 +27,14 @@
 
 #include <stout/duration.hpp>
 #include <stout/gtest.hpp>
+#include <stout/hashmap.hpp>
 #include <stout/lambda.hpp>
 #include <stout/nothing.hpp>
 #include <stout/os.hpp>
 #include <stout/stringify.hpp>
 #include <stout/stopwatch.hpp>
+#include <stout/try.hpp>
+#include <stout/tuple.hpp>
 
 #include "encoder.hpp"
 
@@ -75,9 +78,10 @@ TEST(Process, associate)
   EXPECT_TRUE(promise1.future().get());
 
   Promise<bool> promise2;
-  Future<bool> future2;
+  Promise<bool> promise2_;
+  Future<bool> future2 = promise2_.future();
   promise2.associate(future2);
-  future2.discard();
+  promise2_.discard();
   ASSERT_TRUE(promise2.future().isDiscarded());
 
   Promise<bool> promise3;
@@ -87,13 +91,19 @@ TEST(Process, associate)
   ASSERT_TRUE(promise3.future().isFailed());
   EXPECT_EQ("associate", promise3.future().failure());
 
-  // Test that 'discard' is associated in both directions.
+  // Test 'discard' versus 'discarded' after association.
   Promise<bool> promise5;
   Future<bool> future3;
   promise5.associate(future3);
   EXPECT_FALSE(future3.isDiscarded());
   promise5.future().discard();
-  EXPECT_TRUE(future3.isDiscarded());
+  EXPECT_TRUE(future3.hasDiscard());
+
+  Promise<bool> promise6;
+  Promise<bool> promise7;
+  promise6.associate(promise7.future());
+  promise7.discard();
+  EXPECT_TRUE(promise6.future().isDiscarded());
 }
 
 
@@ -151,6 +161,91 @@ TEST(Process, then)
 }
 
 
+Future<Nothing> after(volatile bool* executed, const Future<Nothing>& future)
+{
+  EXPECT_TRUE(future.hasDiscard());
+  *executed = true;
+  return Failure("Failure");
+}
+
+
+// Checks that the 'after' callback gets executed if the future is not
+// completed.
+TEST(Process, after1)
+{
+  Clock::pause();
+
+  volatile bool executed = false;
+
+  Future<Nothing> future = Future<Nothing>()
+    .after(Hours(42), lambda::bind(&after, &executed, lambda::_1));
+
+  // A pending future should stay pending until 'after' is executed.
+  EXPECT_TRUE(future.isPending());
+
+  // Only advanced halfway, future should remain pending.
+  Clock::advance(Hours(21));
+
+  EXPECT_TRUE(future.isPending());
+
+  // Even doing a discard on the future should keep it pending.
+  future.discard();
+
+  EXPECT_TRUE(future.isPending());
+
+  // After advancing all the way the future should now fail because
+  // the 'after' callback gets executed.
+  Clock::advance(Hours(21));
+
+  AWAIT_FAILED(future);
+
+  EXPECT_TRUE(executed);
+
+  Clock::resume();
+}
+
+
+// Checks that completing a promise will keep the 'after' callback
+// from executing.
+TEST(Process, after2)
+{
+  Clock::pause();
+
+  volatile bool executed = false;
+
+  Promise<Nothing> promise;
+
+  Future<Nothing> future = promise.future()
+    .after(Hours(42), lambda::bind(&after, &executed, lambda::_1));
+
+  EXPECT_TRUE(future.isPending());
+
+  // Only advanced halfway, future should remain pending.
+  Clock::advance(Hours(21));
+
+  EXPECT_TRUE(future.isPending());
+
+  // Even doing a discard on the future should keep it pending.
+  future.discard();
+
+  EXPECT_TRUE(future.isPending());
+
+  // Now set the promise, the 'after' timer should be cancelled and
+  // the pending future should be completed.
+  promise.set(Nothing());
+
+  AWAIT_READY(future);
+
+  // Advancing time the rest of the way should not cause the 'after'
+  // callback to execute.
+  Clock::advance(Hours(21));
+
+  EXPECT_FALSE(executed);
+
+  Clock::resume();
+}
+
+
 Future<bool> readyFuture()
 {
   return true;
@@ -163,9 +258,9 @@ Future<bool> failedFuture()
 }
 
 
-Future<bool> pendingFuture(Future<bool>* future)
+Future<bool> pendingFuture(const Future<bool>& future)
 {
-  return *future; // Keep it pending.
+  return future; // Keep it pending.
 }
 
 
@@ -183,8 +278,6 @@ Future<string> third(const string& s)
 
 TEST(Process, chain)
 {
-  Promise<int*> promise;
-
   Future<string> s = readyFuture()
     .then(lambda::bind(&second, lambda::_1))
     .then(lambda::bind(&third, lambda::_1));
@@ -202,20 +295,155 @@ TEST(Process, chain)
 
   ASSERT_TRUE(s.isFailed());
 
-  Future<bool> future;
+  Promise<bool> promise;
 
-  s = pendingFuture(&future)
+  s = pendingFuture(promise.future())
     .then(lambda::bind(&second, lambda::_1))
     .then(lambda::bind(&third, lambda::_1));
 
   ASSERT_TRUE(s.isPending());
+
+  promise.discard();
+
+  AWAIT_DISCARDED(s);
+}
+
+
+Future<bool> inner1(const Future<bool>& future)
+{
+  return future;
+}
+
+
+Future<int> inner2(volatile bool* executed, const Future<int>& future)
+{
+  *executed = true;
+  return future;
+}
+
+
+// Tests that Future::discard does not complete the future unless
+// Promise::discard is invoked.
+TEST(Process, discard1)
+{
+  Promise<bool> promise1;
+  Promise<int> promise2;
+
+  volatile bool executed = false;
+
+  Future<int> future = Future<string>("hello world")
+    .then(lambda::bind(&inner1, promise1.future()))
+    .then(lambda::bind(&inner2, &executed, promise2.future()));
+
   ASSERT_TRUE(future.isPending());
 
-  s.discard();
+  future.discard();
 
-  future.await();
+  // The future should remain pending, even though we discarded it.
+  ASSERT_TRUE(future.hasDiscard());
+  ASSERT_TRUE(future.isPending());
 
-  ASSERT_TRUE(future.isDiscarded());
+  // The future associated with the lambda already executed in the
+  // first 'then' should have the discard propagated to it.
+  ASSERT_TRUE(promise1.future().hasDiscard());
+
+  // But the future assocaited with the lambda that hasn't yet been
+  // executed should not have the discard propagated to it.
+  ASSERT_FALSE(promise2.future().hasDiscard());
+
+  // Now discarding the promise should cause the outer future to be
+  // discarded also.
+  ASSERT_TRUE(promise1.discard());
+
+  AWAIT_DISCARDED(future);
+
+  // And the final lambda should never have executed.
+  ASSERT_FALSE(executed);
+  ASSERT_TRUE(promise2.future().isPending());
+}
+
+
+// Tests that Future::discard does not complete the future and
+// Promise::set can still be invoked to complete the future.
+TEST(Process, discard2)
+{
+  Promise<bool> promise1;
+  Promise<int> promise2;
+
+  volatile bool executed = false;
+
+  Future<int> future = Future<string>("hello world")
+    .then(lambda::bind(&inner1, promise1.future()))
+    .then(lambda::bind(&inner2, &executed, promise2.future()));
+
+  ASSERT_TRUE(future.isPending());
+
+  future.discard();
+
+  // The future should remain pending, even though we discarded it.
+  ASSERT_TRUE(future.hasDiscard());
+  ASSERT_TRUE(future.isPending());
+
+  // The future associated with the lambda already executed in the
+  // first 'then' should have the discard propagated to it.
+  ASSERT_TRUE(promise1.future().hasDiscard());
+
+  // But the future assocaited with the lambda that hasn't yet been
+  // executed should not have the discard propagated to it.
+  ASSERT_FALSE(promise2.future().hasDiscard());
+
+  // Now setting the promise should cause the outer future to be
+  // discarded rather than executing the last lambda because the
+  // implementation of Future::then does not continue the chain once a
+  // discard occurs.
+  ASSERT_TRUE(promise1.set(true));
+
+  AWAIT_DISCARDED(future);
+
+  // And the final lambda should never have executed.
+  ASSERT_FALSE(executed);
+  ASSERT_TRUE(promise2.future().isPending());
+}
+
+
+// Tests that Future::discard does not complete the future and
+// Promise::fail can still be invoked to complete the future.
+TEST(Process, discard3)
+{
+  Promise<bool> promise1;
+  Promise<int> promise2;
+
+  volatile bool executed = false;
+
+  Future<int> future = Future<string>("hello world")
+    .then(lambda::bind(&inner1, promise1.future()))
+    .then(lambda::bind(&inner2, &executed, promise2.future()));
+
+  ASSERT_TRUE(future.isPending());
+
+  future.discard();
+
+  // The future should remain pending, even though we discarded it.
+  ASSERT_TRUE(future.hasDiscard());
+  ASSERT_TRUE(future.isPending());
+
+  // The future associated with the lambda already executed in the
+  // first 'then' should have the discard propagated to it.
+  ASSERT_TRUE(promise1.future().hasDiscard());
+
+  // But the future assocaited with the lambda that hasn't yet been
+  // executed should not have the discard propagated to it.
+  ASSERT_FALSE(promise2.future().hasDiscard());
+
+  // Now failing the promise should cause the outer future to be
+  // failed also.
+  ASSERT_TRUE(promise1.fail("failure message"));
+
+  AWAIT_FAILED(future);
+
+  // And the final lambda should never have executed.
+  ASSERT_FALSE(executed);
+  ASSERT_TRUE(promise2.future().isPending());
 }
 
 
@@ -634,7 +862,7 @@ TEST(Process, thunk)
 class DelegatorProcess : public Process<DelegatorProcess>
 {
 public:
-  DelegatorProcess(const UPID& delegatee)
+  explicit DelegatorProcess(const UPID& delegatee)
   {
     delegate("func", delegatee);
   }
@@ -794,7 +1022,7 @@ TEST(Process, donate)
 class ExitedProcess : public Process<ExitedProcess>
 {
 public:
-  ExitedProcess(const UPID& pid) { link(pid); }
+  explicit ExitedProcess(const UPID& pid) { link(pid); }
 
   MOCK_METHOD1(exited, void(const UPID&));
 };
@@ -843,10 +1071,17 @@ TEST(Process, select)
 
   Future<Future<int> > future = select(futures);
 
-  EXPECT_TRUE(future.await());
-  EXPECT_TRUE(future.isReady());
-  EXPECT_TRUE(future.get().isReady());
+  AWAIT_READY(future);
+  AWAIT_READY(future.get());
   EXPECT_EQ(42, future.get().get());
+
+  futures.erase(promise1.future());
+
+  future = select(futures);
+  EXPECT_TRUE(future.isPending());
+
+  future.discard();
+  AWAIT_DISCARDED(future);
 }
 
 
@@ -893,7 +1128,7 @@ TEST(Process, collect)
 }
 
 
-TEST(Process, await)
+TEST(Process, await1)
 {
   ASSERT_TRUE(GTEST_IS_THREADSAFE);
 
@@ -933,6 +1168,58 @@ TEST(Process, await)
     ASSERT_TRUE(result.isReady());
     ASSERT_EQ(i++, result.get());
   }
+}
+
+
+TEST(Process, await2)
+{
+  Promise<int> promise1;
+  Promise<bool> promise2;
+
+  Future<tuples::tuple<Future<int>, Future<bool> > > future =
+    await(promise1.future(), promise2.future());
+  ASSERT_TRUE(future.isPending());
+
+  promise1.set(42);
+
+  ASSERT_TRUE(future.isPending());
+
+  promise2.fail("failure message");
+
+  AWAIT_READY(future);
+
+  tuples::tuple<Future<int>, Future<bool> > futures = future.get();
+
+  ASSERT_TRUE(tuples::get<0>(futures).isReady());
+  ASSERT_EQ(42, tuples::get<0>(futures).get());
+
+  ASSERT_TRUE(tuples::get<1>(futures).isFailed());
+}
+
+
+TEST(Process, await3)
+{
+  Promise<int> promise1;
+  Promise<bool> promise2;
+
+  Future<tuples::tuple<Future<int>, Future<bool> > > future =
+    await(promise1.future(), promise2.future());
+  ASSERT_TRUE(future.isPending());
+
+  promise1.set(42);
+
+  ASSERT_TRUE(future.isPending());
+
+  promise2.discard();
+
+  AWAIT_READY(future);
+
+  tuples::tuple<Future<int>, Future<bool> > futures = future.get();
+
+  ASSERT_TRUE(tuples::get<0>(futures).isReady());
+  ASSERT_EQ(42, tuples::get<0>(futures).get());
+
+  ASSERT_TRUE(tuples::get<1>(futures).isDiscarded());
 }
 
 
@@ -1101,13 +1388,11 @@ TEST(Process, remote)
   ASSERT_TRUE(GTEST_IS_THREADSAFE);
 
   RemoteProcess process;
-
-  volatile bool handlerCalled = false;
-
-  EXPECT_CALL(process, handler(_, _))
-    .WillOnce(Assign(&handlerCalled, true));
-
   spawn(process);
+
+  Future<Nothing> handler;
+  EXPECT_CALL(process, handler(_, _))
+    .WillOnce(FutureSatisfy(&handler));
 
   int s = ::socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
 
@@ -1132,7 +1417,111 @@ TEST(Process, remote)
 
   ASSERT_EQ(0, close(s));
 
-  while (!handlerCalled);
+  AWAIT_READY(handler);
+
+  terminate(process);
+  wait(process);
+}
+
+
+// Like the 'remote' test but uses http::post.
+TEST(Process, http1)
+{
+  ASSERT_TRUE(GTEST_IS_THREADSAFE);
+
+  RemoteProcess process;
+  spawn(process);
+
+  Future<UPID> pid;
+  Future<string> body;
+  EXPECT_CALL(process, handler(_, _))
+    .WillOnce(DoAll(FutureArg<0>(&pid),
+                    FutureArg<1>(&body)));
+
+  hashmap<string, string> headers;
+  headers["User-Agent"] = "libprocess/";
+
+  Future<http::Response> response =
+    http::post(process.self(), "handler", headers, "hello world");
+
+  AWAIT_READY(body);
+  ASSERT_EQ("hello world", body.get());
+
+  AWAIT_READY(pid);
+  ASSERT_EQ(UPID(), pid.get());
+
+  terminate(process);
+  wait(process);
+}
+
+
+// Like 'http1' but using a 'Libprocess-From' header.
+TEST(Process, http2)
+{
+  ASSERT_TRUE(GTEST_IS_THREADSAFE);
+
+  RemoteProcess process;
+  spawn(process);
+
+  // Create a receiving socket so we can get messages back.
+  int s = ::socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
+  ASSERT_LE(0, s);
+
+  // Set up socket.
+  sockaddr_in addr;
+  memset(&addr, 0, sizeof(addr));
+  addr.sin_family = PF_INET;
+  addr.sin_addr.s_addr = INADDR_ANY;
+  addr.sin_port = 0;
+
+  ASSERT_EQ(0, ::bind(s, (sockaddr*) &addr, sizeof(addr)));
+
+  // Create a UPID for 'Libprocess-From' based on the IP and port we
+  // got assigned.
+  socklen_t addrlen = sizeof(addr);
+  ASSERT_EQ(0, getsockname(s, (sockaddr*) &addr, &addrlen));
+
+  UPID from("", addr.sin_addr.s_addr, ntohs(addr.sin_port));
+
+  ASSERT_EQ(0, listen(s, 1));
+
+  Future<UPID> pid;
+  Future<string> body;
+  EXPECT_CALL(process, handler(_, _))
+    .WillOnce(DoAll(FutureArg<0>(&pid),
+                    FutureArg<1>(&body)));
+
+  hashmap<string, string> headers;
+  headers["Libprocess-From"] = stringify(from);
+
+  Future<http::Response> response =
+    http::post(process.self(), "handler", headers, "hello world");
+
+  AWAIT_READY(response);
+  ASSERT_EQ(http::statuses[202], response.get().status);
+
+  AWAIT_READY(body);
+  ASSERT_EQ("hello world", body.get());
+
+  AWAIT_READY(pid);
+  ASSERT_EQ(from, pid.get());
+
+  // Now post a message as though it came from the process.
+  const string name = "reply";
+  post(process.self(), from, name);
+
+  // Accept the incoming connection.
+  memset(&addr, 0, sizeof(addr));
+  addrlen = sizeof(addr);
+
+  int c = ::accept(s, (sockaddr*) &addr, &addrlen);
+  ASSERT_LT(0, c);
+
+  const string data = "POST /" + name + " HTTP/1.0";
+  EXPECT_SOME_EQ(data, os::read(c, data.size()));
+
+  close(c);
+  close(s);
 
   terminate(process);
   wait(process);
@@ -1224,7 +1613,7 @@ TEST(Process, limiter)
 class FileServer : public Process<FileServer>
 {
 public:
-  FileServer(const string& _path)
+  explicit FileServer(const string& _path)
     : path(_path) {}
 
   virtual void initialize()
@@ -1413,3 +1802,69 @@ TEST(Process, defers)
       defer(functor));
 }
 #endif // __cplusplus >= 201103L
+
+
+TEST(Future, FromTry)
+{
+  Try<int> t = 1;
+  Future<int> future = t;
+
+  ASSERT_TRUE(future.isReady());
+  EXPECT_EQ(1, future.get());
+
+  t = Error("error");
+  future = t;
+
+  ASSERT_TRUE(future.isFailed());
+}
+
+
+class PercentEncodedIDProcess : public Process<PercentEncodedIDProcess>
+{
+public:
+  PercentEncodedIDProcess()
+    : ProcessBase("id(42)") {}
+
+  virtual void initialize()
+  {
+    install("handler1", &Self::handler1);
+    route("/handler2", None(), &Self::handler2);
+  }
+
+  MOCK_METHOD2(handler1, void(const UPID&, const string&));
+  MOCK_METHOD1(handler2, Future<http::Response>(const http::Request&));
+};
+
+
+TEST(Process, PercentEncodedURLs)
+{
+  PercentEncodedIDProcess process;
+  spawn(process);
+
+  // Construct the PID using percent-encoding.
+  UPID pid("id%2842%29", process.self().ip, process.self().port);
+
+  // Mimic a libprocess message sent to an installed handler.
+  Future<Nothing> handler1;
+  EXPECT_CALL(process, handler1(_, _))
+    .WillOnce(FutureSatisfy(&handler1));
+
+  hashmap<string, string> headers;
+  headers["User-Agent"] = "libprocess/";
+
+  Future<http::Response> response = http::post(pid, "handler1", headers);
+
+  AWAIT_READY(handler1);
+
+  // Now an HTTP request.
+  EXPECT_CALL(process, handler2(_))
+    .WillOnce(Return(http::OK()));
+
+  response = http::get(pid, "handler2");
+
+  AWAIT_READY(response);
+  EXPECT_EQ(http::statuses[200], response.get().status);
+
+  terminate(process);
+  wait(process);
+}

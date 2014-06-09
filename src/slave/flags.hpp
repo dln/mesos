@@ -43,6 +43,11 @@ public:
         "The hostname the slave should report.\n"
         "If left unset, system hostname will be used (recommended).");
 
+    add(&Flags::version,
+        "version",
+        "Show version and exit.",
+        false);
+
     // TODO(benh): Is there a way to specify units for the resources?
     add(&Flags::resources,
         "resources",
@@ -52,7 +57,7 @@ public:
     add(&Flags::isolation,
         "isolation",
         "Isolation mechanisms to use, e.g., 'posix/cpu,posix/mem'\n"
-        "or 'cgroups/cpu,cgroups/mem'.",
+        "or 'cgroups/cpu,cgroups/mem' or 'external'.",
         "posix/cpu,posix/mem");
 
     add(&Flags::default_role,
@@ -65,8 +70,8 @@ public:
         "*");
 
     add(&Flags::attributes,
-      "attributes",
-      "Attributes of machine");
+        "attributes",
+        "Attributes of machine");
 
     add(&Flags::work_dir,
         "work_dir",
@@ -97,6 +102,16 @@ public:
         "frameworks_home",
         "Directory prepended to relative executor URIs",
         "");
+
+    add(&Flags::registration_backoff_factor,
+        "registration_backoff_factor",
+        "Slave initially picks a random amount of time between [0, b], where\n"
+        "b = register_backoff_factor, to (re-)register with a new master.\n"
+        "Subsequent retries are exponentially backed off based on this\n"
+        "interval (e.g., 1st retry uses a random value between [0, b * 2^1],\n"
+        "2nd retry between [0, b * 2^2], 3rd retry between [0, b * 2^3] etc)\n"
+        "up to a maximum of " + stringify(REGISTER_RETRY_INTERVAL_MAX),
+        REGISTRATION_BACKOFF_FACTOR);
 
     add(&Flags::executor_registration_timeout,
         "executor_registration_timeout",
@@ -137,7 +152,7 @@ public:
         "Whether to checkpoint slave and frameworks information\n"
         "to disk. This enables a restarted slave to recover\n"
         "status updates and reconnect with (--recover=reconnect) or\n"
-        "kill (--recover=kill) old executors",
+        "kill (--recover=cleanup) old executors",
         true);
 
     add(&Flags::recover,
@@ -190,9 +205,34 @@ public:
         "Cgroups feature flag to enable hard limits on CPU resources\n"
         "via the CFS bandwidth limiting subfeature.\n",
         false);
+
+    add(&Flags::slave_subsystems,
+        "slave_subsystems",
+        "List of comma-separated cgroup subsystems to run the slave binary\n"
+        "in, e.g., 'memory,cpuacct'. The default is none.\n"
+        "Present functionality is intended for resource monitoring and\n"
+        "no cgroup limits are set, they are inherited from the root mesos\n"
+        "cgroup.");
 #endif
+
+    add(&Flags::credential,
+        "credential",
+        "Path to a file containing a single line with\n"
+        "the 'principal' and 'secret' separated by whitespace.\n"
+        "Path could be of the form 'file:///path/to/file' or '/path/to/file'");
+
+    add(&Flags::containerizer_path,
+        "containerizer_path",
+        "The path to the external containerizer executable used when\n"
+        "external isolation is activated (--isolation=external).\n");
+
+    add(&Flags::default_container_image,
+        "default_container_image",
+        "The default container image to use if not specified by a task,\n"
+        "when using external containerizer");
   }
 
+  bool version;
   Option<std::string> hostname;
   Option<std::string> resources;
   std::string isolation;
@@ -203,6 +243,7 @@ public:
   std::string hadoop_home; // TODO(benh): Make an Option.
   bool switch_user;
   std::string frameworks_home;  // TODO(benh): Make an Option.
+  Duration registration_backoff_factor;
   Duration executor_registration_timeout;
   Duration executor_shutdown_grace_period;
   Duration gc_delay;
@@ -212,12 +253,17 @@ public:
   std::string recover;
   Duration recovery_timeout;
   bool strict;
+  Duration register_retry_interval_min;
 #ifdef __linux__
   std::string cgroups_hierarchy;
   std::string cgroups_root;
   Option<std::string> cgroups_subsystems;
   bool cgroups_enable_cfs;
+  Option<std::string> slave_subsystems;
 #endif
+  Option<std::string> credential;
+  Option<std::string> containerizer_path;
+  Option<std::string> default_container_image;
 };
 
 } // namespace mesos {

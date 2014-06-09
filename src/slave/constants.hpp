@@ -37,12 +37,24 @@ namespace slave {
 extern const Duration EXECUTOR_REGISTRATION_TIMEOUT;
 extern const Duration EXECUTOR_SHUTDOWN_GRACE_PERIOD;
 extern const Duration EXECUTOR_REREGISTER_TIMEOUT;
+extern const Duration EXECUTOR_SIGNAL_ESCALATION_TIMEOUT;
 extern const Duration RECOVERY_TIMEOUT;
 extern const Duration STATUS_UPDATE_RETRY_INTERVAL_MIN;
 extern const Duration STATUS_UPDATE_RETRY_INTERVAL_MAX;
 extern const Duration GC_DELAY;
 extern const Duration DISK_WATCH_INTERVAL;
 extern const Duration RESOURCE_MONITORING_INTERVAL;
+
+
+// Default backoff interval used by the slave to wait before registration.
+extern const Duration REGISTRATION_BACKOFF_FACTOR;
+
+// The maximum interval the slave waits before retrying registration.
+// Note that this value has to be << 'MIN_SLAVE_REREGISTER_TIMEOUT'
+// declared in 'master/constants.hpp'. This helps the slave to retry
+// (re-)registration multiple times between when the master finishes
+// recovery and when it times out slave re-registration.
+extern const Duration REGISTER_RETRY_INTERVAL_MAX;
 
 // Minimum free disk capacity enforced by the garbage collector.
 extern const double GC_DISK_HEADROOM;

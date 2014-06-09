@@ -16,19 +16,22 @@
  * limitations under the License.
  */
 
+#include <sched.h>
 #include <unistd.h>
+
+#include <linux/sched.h>
 
 #include <vector>
 
+#include <stout/abort.hpp>
 #include <stout/hashset.hpp>
 #include <stout/path.hpp>
-#include <stout/unreachable.hpp>
 
 #include "linux/cgroups.hpp"
 
 #include "mesos/resources.hpp"
 
-#include "slave/containerizer/cgroups_launcher.hpp"
+#include "slave/containerizer/linux_launcher.hpp"
 
 using namespace process;
 
@@ -42,28 +45,35 @@ namespace slave {
 
 using state::RunState;
 
-CgroupsLauncher::CgroupsLauncher(const Flags& _flags, const string& _hierarchy)
+LinuxLauncher::LinuxLauncher(
+    const Flags& _flags,
+    int _namespaces,
+    const string& _hierarchy)
   : flags(_flags),
+    namespaces(_namespaces),
     hierarchy(_hierarchy) {}
 
 
-Try<Launcher*> CgroupsLauncher::create(const Flags& flags)
+Try<Launcher*> LinuxLauncher::create(const Flags& flags)
 {
   Try<string> hierarchy = cgroups::prepare(
       flags.cgroups_hierarchy, "freezer", flags.cgroups_root);
 
   if (hierarchy.isError()) {
-    return Error("Failed to create cgroups launcher: " + hierarchy.error());
+    return Error("Failed to create Linux launcher: " + hierarchy.error());
   }
 
   LOG(INFO) << "Using " << hierarchy.get()
-            << " as the freezer hierarchy for the cgroups launcher";
+            << " as the freezer hierarchy for the Linux launcher";
 
-  return new CgroupsLauncher(flags, hierarchy.get());
+  // TODO(idownes): Inspect the isolation flag to determine namespaces to use.
+  int namespaces = 0;
+
+  return new LinuxLauncher(flags, namespaces, hierarchy.get());
 }
 
 
-Try<Nothing> CgroupsLauncher::recover(const std::list<state::RunState>& states)
+Try<Nothing> LinuxLauncher::recover(const std::list<state::RunState>& states)
 {
   hashset<string> cgroups;
 
@@ -123,30 +133,74 @@ Try<Nothing> CgroupsLauncher::recover(const std::list<state::RunState>& states)
 }
 
 
-Try<pid_t> CgroupsLauncher::fork(
+// Helper for clone() which expects an int(void*).
+static int childMain(void* child)
+{
+  const lambda::function<int()>* func =
+    static_cast<const lambda::function<int()>*> (child);
+
+  return (*func)();
+}
+
+
+// Helper that creates a new session then blocks on reading the pipe before
+// calling the supplied function.
+static int _childMain(
+    const lambda::function<int()>& childFunction,
+    int pipes[2])
+{
+  // In child.
+  os::close(pipes[1]);
+
+  // Move to a different session (and new process group) so we're independent
+  // from the slave's session (otherwise children will receive SIGHUP if the
+  // slave exits).
+  // TODO(idownes): perror is not listed as async-signal-safe and should be
+  // reimplemented safely.
+  if (setsid() == -1) {
+    perror("Failed to put child in a new session");
+    os::close(pipes[0]);
+    _exit(1);
+  }
+
+  // Do a blocking read on the pipe until the parent signals us to continue.
+  int buf;
+  int len;
+  while ((len = read(pipes[0], &buf, sizeof(buf))) == -1 && errno == EINTR);
+
+  if (len != sizeof(buf)) {
+    ABORT("Failed to synchronize with parent");
+  }
+
+  os::close(pipes[0]);
+
+  // This function should exec() and therefore not return.
+  childFunction();
+
+  ABORT("Child failed to exec");
+
+  return -1;
+}
+
+
+Try<pid_t> LinuxLauncher::fork(
     const ContainerID& containerId,
-    const lambda::function<int()>& inChild)
+    const lambda::function<int()>& childFunction)
 {
   // Create a freezer cgroup for this container if necessary.
   Try<bool> exists = cgroups::exists(hierarchy, cgroup(containerId));
-
   if (exists.isError()) {
-    return Error("Failed to create freezer cgroup: " + exists.error());
+    return Error("Failed to check existence of freezer cgroup: " +
+                 exists.error());
   }
 
   if (!exists.get()) {
     Try<Nothing> created = cgroups::create(hierarchy, cgroup(containerId));
 
     if (created.isError()) {
-      LOG(ERROR) << "Failed to create freezer cgroup for container '"
-                 << containerId << "': " << created.error();
-      return Error("Failed to contain process: " + created.error());
+      return Error("Failed to create freezer cgroup: " + created.error());
     }
   }
-
-  // Additional processes forked will be put into the same process group and
-  // session.
-  Option<pid_t> pgid = pids.get(containerId);
 
   // Use a pipe to block the child until it's been moved into the freezer
   // cgroup.
@@ -154,57 +208,26 @@ Try<pid_t> CgroupsLauncher::fork(
   // We assume this should not fail under reasonable conditions so we use CHECK.
   CHECK(pipe(pipes) == 0);
 
+  // Use the _childMain helper which moves the child into a new session and
+  // blocks on the pipe until we're ready for it to run.
+  lambda::function<int()> func =
+    lambda::bind(&_childMain, childFunction, pipes);
+
+  // Stack for the child.
+  // - unsigned long long used for best alignment.
+  // - static is ok because each child gets their own copy after the clone.
+  // - 8 MiB appears to be the default for "ulimit -s" on OSX and Linux.
+  static unsigned long long stack[(8*1024*1024)/sizeof(unsigned long long)];
+
+  LOG(INFO) << "Cloning child process with flags = " << namespaces;
+
   pid_t pid;
-
-  if ((pid = ::fork()) == -1) {
-    return ErrnoError("Failed to fork");
-  }
-
-  if (pid == 0) {
-    // In child.
-    os::close(pipes[1]);
-
-    // Move to a previously created process group (and session) if available,
-    // else create a new session and process group. Even though we track
-    // processes using cgroups we need to move to a different session so we're
-    // independent from the slave's session (otherwise children will receive
-    // SIGHUP if the slave exits).
-    // TODO(idownes): perror is not listed as async-signal-safe and should be
-    // reimplemented safely.
-    if (pgid.isSome() && (setpgid(0, pgid.get()) == -1)) {
-      perror("Failed to put child into process group");
-      os::close(pipes[0]);
-      _exit(1);
-    } else if (setsid() == -1) {
-      perror("Failed to put child in a new session");
-      os::close(pipes[0]);
-      _exit(1);
-    }
-
-    // Do a blocking read on the pipe until the parent signals us to continue.
-    int buf;
-    int len;
-    while ((len = read(pipes[0], &buf, sizeof(buf))) == -1 && errno == EINTR);
-
-    if (len != sizeof(buf)) {
-      const char* message = "Failed to synchronize with parent";
-      // Ignore the return value from write() to silence compiler warning.
-      while (write(STDERR_FILENO, message, strlen(message)) == -1 &&
-          errno == EINTR);
-      os::close(pipes[0]);
-      _exit(1);
-    }
-
-    os::close(pipes[0]);
-
-    // This function should exec() and therefore not return.
-    inChild();
-
-    const char* message = "Child failed to exec";
-    while (write(STDERR_FILENO, message, strlen(message)) == -1 &&
-        errno == EINTR);
-
-    _exit(1);
+  if ((pid = ::clone(
+          childMain,
+          &stack[sizeof(stack)/sizeof(stack[0]) - 1],  // stack grows down
+          namespaces | SIGCHLD,   // Specify SIGCHLD as child termination signal
+          static_cast<void*>(&func))) == -1) {
+      return ErrnoError("Failed to clone child process");
   }
 
   // Parent.
@@ -259,7 +282,7 @@ Future<Nothing> _destroy(
 }
 
 
-Future<Nothing> CgroupsLauncher::destroy(const ContainerID& containerId)
+Future<Nothing> LinuxLauncher::destroy(const ContainerID& containerId)
 {
   pids.erase(containerId);
 
@@ -268,7 +291,7 @@ Future<Nothing> CgroupsLauncher::destroy(const ContainerID& containerId)
 }
 
 
-string CgroupsLauncher::cgroup(const ContainerID& containerId)
+string LinuxLauncher::cgroup(const ContainerID& containerId)
 {
   return path::join(flags.cgroups_root, containerId.value());
 }

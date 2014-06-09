@@ -545,7 +545,6 @@ static Option<Error> verify(
   }
 
   if (control != "") {
-    CHECK(cgroup != "");
     if (!os::exists(path::join(hierarchy, cgroup, control))) {
       return Error(
           "'" + control + "' is not a valid control (is subsystem attached?)");
@@ -1011,15 +1010,24 @@ Try<bool> exists(
 }
 
 
-Try<set<pid_t> > processes(const string& hierarchy, const string& cgroup)
+namespace internal {
+
+// Return a set of tasks (schedulable entities) for the cgroup.
+// If control == "cgroup.procs" these are processes else
+// if control == "tasks" they are all tasks, roughly equivalent to threads.
+Try<set<pid_t> > tasks(
+    const string& hierarchy,
+    const string& cgroup,
+    const string& control)
 {
   // Note: (from cgroups/cgroups.txt documentation)
   // cgroup.procs: list of thread group IDs in the cgroup. This list is not
   // guaranteed to be sorted or free of duplicate TGIDs, and userspace should
   // sort/uniquify the list if this property is required.
-  Try<string> value = cgroups::read(hierarchy, cgroup, "cgroup.procs");
+  Try<string> value = cgroups::read(hierarchy, cgroup, control);
   if (value.isError()) {
-    return Error("Failed to read cgroups control 'cgroup.procs': " + value.error());
+    return Error("Failed to read cgroups control '" +
+                 control + "': " + value.error());
   }
 
   // Parse the values read from the control file and insert into a set. This
@@ -1043,10 +1051,26 @@ Try<set<pid_t> > processes(const string& hierarchy, const string& cgroup)
   return pids;
 }
 
+} // namespace internal
+
+
+// NOTE: It is possible for a process pid to be in more than one cgroup if it
+// has separate threads (tasks) in different cgroups.
+Try<set<pid_t> > processes(const string& hierarchy, const string& cgroup)
+{
+  return internal::tasks(hierarchy, cgroup, "cgroup.procs");
+}
+
+
+Try<set<pid_t> > threads(const string& hierarchy, const string& cgroup)
+{
+  return internal::tasks(hierarchy, cgroup, "tasks");
+}
+
 
 Try<Nothing> assign(const string& hierarchy, const string& cgroup, pid_t pid)
 {
-  return cgroups::write(hierarchy, cgroup, "tasks", stringify(pid));
+  return cgroups::write(hierarchy, cgroup, "cgroup.procs", stringify(pid));
 }
 
 
@@ -1183,7 +1207,7 @@ protected:
     // Stop the listener if no one cares. Note that here we explicitly specify
     // the type of the terminate function because it is an overloaded function.
     // The compiler complains if we do not do it.
-    promise.future().onDiscarded(lambda::bind(
+    promise.future().onDiscard(lambda::bind(
         static_cast<void (*)(const UPID&, bool)>(terminate), self(), true));
 
     // Register an eventfd "notifier" for the given control.
@@ -1217,6 +1241,10 @@ protected:
         LOG(ERROR) << "Failed to unregistering eventfd: " << unregister.error();
       }
     }
+
+    // TODO(benh): Discard our promise only after 'reading' has
+    // completed (ready, failed, or discarded).
+    promise.discard();
   }
 
 private:
@@ -1224,24 +1252,14 @@ private:
   // result, either because the event has happened, or an error has occurred.
   void notified(const Future<size_t>&)
   {
-    // Ignore this function if the promise is no longer pending.
-    if (!promise.future().isPending()) {
-      return;
-    }
-
-    // Since the future reading can only be discarded when the promise is no
-    // longer pending, we shall never see a discarded reading here because of
-    // the check in the beginning of the function.
-    CHECK(!reading.isDiscarded());
-
-    if (reading.isFailed()) {
+    if (reading.isDiscarded()) {
+      promise.discard();
+    } else if (reading.isFailed()) {
       promise.fail("Failed to read eventfd: " + reading.failure());
+    } else if (reading.get() == sizeof(data)) {
+      promise.set(data);
     } else {
-      if (reading.get() == sizeof(data)) {
-        promise.set(data);
-      } else {
-        promise.fail("Read less than expected");
-      }
+      promise.fail("Read less than expected");
     }
 
     terminate(self());
@@ -1306,7 +1324,7 @@ protected:
   virtual void initialize()
   {
     // Stop the process if no one cares.
-    promise.future().onDiscarded(lambda::bind(
+    promise.future().onDiscard(lambda::bind(
         static_cast<void (*)(const UPID&, bool)>(terminate), self(), true));
 
     CHECK(interval >= Seconds(0));
@@ -1318,6 +1336,11 @@ protected:
     } else if (action == "THAW") {
       thaw();
     }
+  }
+
+  virtual void finalize()
+  {
+    promise.discard();
   }
 
 private:
@@ -1564,12 +1587,17 @@ protected:
   virtual void initialize()
   {
     // Stop when no one cares.
-    promise.future().onDiscarded(lambda::bind(
+    promise.future().onDiscard(lambda::bind(
         static_cast<void (*)(const UPID&, bool)>(terminate), self(), true));
 
     CHECK(interval >= Seconds(0));
 
     check();
+  }
+
+  virtual void finalize()
+  {
+    promise.discard();
   }
 
 private:
@@ -1626,7 +1654,7 @@ protected:
   virtual void initialize()
   {
     // Stop when no one cares.
-    promise.future().onDiscarded(lambda::bind(
+    promise.future().onDiscard(lambda::bind(
           static_cast<void(*)(const UPID&, bool)>(terminate), self(), true));
 
     CHECK(interval >= Seconds(0));
@@ -1637,8 +1665,12 @@ protected:
   virtual void finalize()
   {
     // Cancel the chain of operations if the user discards the future.
-    if (promise.future().isDiscarded()) {
+    if (promise.future().hasDiscard()) {
       chain.discard();
+
+      // TODO(benh): Discard our promise only after 'chain' has
+      // completed (ready, failed, or discarded).
+      promise.discard();
     }
   }
 
@@ -1651,13 +1683,20 @@ private:
     // ignore the return values of freeze, kill, and thaw because,
     // provided there are no errors, we'll just retry the chain as
     // long as tasks still exist.
-    chain = kill(SIGSTOP)                        // Send stop signal to all tasks.
-      .then(defer(self(), &Self::kill, SIGKILL)) // Now send kill signal.
-      .then(defer(self(), &Self::empty))         // Wait until cgroup is empty.
-      .then(defer(self(), &Self::freeze))        // Freeze cgroug.
-      .then(defer(self(), &Self::kill, SIGKILL)) // Send kill signal to any remaining tasks.
-      .then(defer(self(), &Self::thaw))          // Thaw cgroup to deliver signals.
-      .then(defer(self(), &Self::empty));        // Wait until cgroup is empty.
+    // Send stop signal to all tasks.
+    chain = kill(SIGSTOP)
+      // Now send kill signal.
+      .then(defer(self(), &Self::kill, SIGKILL))
+      // Wait until cgroup is empty.
+      .then(defer(self(), &Self::empty))
+      // Freeze cgroup.
+      .then(defer(self(), &Self::freeze))
+      // Send kill signal to any remaining tasks.
+      .then(defer(self(), &Self::kill, SIGKILL))
+      // Thaw cgroup to deliver signals.
+      .then(defer(self(), &Self::thaw))
+      // Wait until cgroup is empty.
+      .then(defer(self(), &Self::empty));
 
     chain.onAny(defer(self(), &Self::finished, lambda::_1));
   }
@@ -1691,8 +1730,10 @@ private:
 
   void finished(const Future<bool>& empty)
   {
-    CHECK(!empty.isPending() && !empty.isDiscarded());
-    if (empty.isFailed()) {
+    if (empty.isDiscarded()) {
+      promise.discard();
+      terminate(self());
+    } else if (empty.isFailed()) {
       promise.fail(empty.failure());
       terminate(self());
     } else if (empty.get()) {
@@ -1733,7 +1774,7 @@ protected:
   virtual void initialize()
   {
     // Stop when no one cares.
-    promise.future().onDiscarded(lambda::bind(
+    promise.future().onDiscard(lambda::bind(
           static_cast<void(*)(const UPID&, bool)>(terminate), self(), true));
 
     CHECK(interval >= Seconds(0));
@@ -1754,17 +1795,23 @@ protected:
   virtual void finalize()
   {
     // Cancel the operation if the user discards the future.
-    if (promise.future().isDiscarded()) {
+    if (promise.future().hasDiscard()) {
       discard<bool>(killers);
+
+      // TODO(benh): Discard our promise only after all 'killers' have
+      // completed (ready, failed, or discarded).
+      promise.discard();
     }
   }
 
 private:
   void killed(const Future<list<bool> >& kill)
   {
-    CHECK(!kill.isPending() && !kill.isDiscarded());
     if (kill.isReady()) {
       remove();
+    } else if (kill.isDiscarded()) {
+      promise.discard();
+      terminate(self());
     } else if (kill.isFailed()) {
       promise.fail("Failed to kill tasks in nested cgroups: " + kill.failure());
       terminate(self());
@@ -1937,7 +1984,7 @@ namespace cpu {
 Try<Nothing> shares(
     const string& hierarchy,
     const string& cgroup,
-    size_t shares)
+    uint64_t shares)
 {
   return cgroups::write(
       hierarchy,

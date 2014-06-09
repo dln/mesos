@@ -19,6 +19,8 @@
 #ifndef __MASTER_HPP__
 #define __MASTER_HPP__
 
+#include <stdint.h>
+
 #include <list>
 #include <string>
 #include <vector>
@@ -31,7 +33,13 @@
 #include <process/owned.hpp>
 #include <process/process.hpp>
 #include <process/protobuf.hpp>
+#include <process/timer.hpp>
 
+#include <process/metrics/counter.hpp>
+#include <process/metrics/gauge.hpp>
+#include <process/metrics/metrics.hpp>
+
+#include <stout/cache.hpp>
 #include <stout/foreach.hpp>
 #include <stout/hashmap.hpp>
 #include <stout/hashset.hpp>
@@ -55,23 +63,25 @@
 namespace mesos {
 namespace internal {
 
-namespace sasl {
-
-class Authenticator; // Forward declaration.
-
+// Forward declarations.
+namespace registry {
+class Slaves;
 }
+
+namespace sasl {
+class Authenticator;
+}
+
+class Authorizer;
 
 namespace master {
 
-using namespace process; // Included to make code easier to read.
-
 // Forward declarations.
 namespace allocator {
-
 class Allocator;
-
 }
 
+class Repairer;
 class SlaveObserver;
 class WhitelistWatcher;
 
@@ -86,6 +96,7 @@ class Master : public ProtobufProcess<Master>
 public:
   Master(allocator::Allocator* allocator,
          Registrar* registrar,
+         Repairer* repairer,
          Files* files,
          MasterContender* contender,
          MasterDetector* detector,
@@ -126,6 +137,14 @@ public:
       const process::UPID& from,
       const FrameworkID& frameworkId,
       const TaskID& taskId);
+
+  void statusUpdateAcknowledgement(
+      const process::UPID& from,
+      const SlaveID& slaveId,
+      const FrameworkID& frameworkId,
+      const TaskID& taskId,
+      const std::string& uuid);
+
   void schedulerMessage(
       const process::UPID& from,
       const SlaveID& slaveId,
@@ -140,27 +159,33 @@ public:
       const SlaveID& slaveId,
       const SlaveInfo& slaveInfo,
       const std::vector<ExecutorInfo>& executorInfos,
-      const std::vector<Task>& tasks);
+      const std::vector<Task>& tasks,
+      const std::vector<Archive::Framework>& completedFrameworks);
+
   void unregisterSlave(
       const SlaveID& slaveId);
+
   void statusUpdate(
       const StatusUpdate& update,
-      const UPID& pid);
+      const process::UPID& pid);
+
   void exitedExecutor(
       const process::UPID& from,
       const SlaveID& slaveId,
       const FrameworkID& frameworkId,
       const ExecutorID& executorId,
       int32_t status);
-  void deactivateSlave(
-      const SlaveID& slaveId);
+
+  void shutdownSlave(
+      const SlaveID& slaveId,
+      const std::string& message);
 
   // TODO(bmahler): It would be preferred to use a unique libprocess
   // Process identifier (PID is not sufficient) for identifying the
   // framework instance, rather than relying on re-registration time.
   void frameworkFailoverTimeout(
       const FrameworkID& frameworkId,
-      const Time& reregisteredTime);
+      const process::Time& reregisteredTime);
 
   void offer(
       const FrameworkID& framework,
@@ -177,11 +202,28 @@ public:
 
   // Invoked when there is a newly elected leading master.
   // Made public for testing purposes.
-  void detected(const Future<Option<MasterInfo> >& pid);
+  void detected(const process::Future<Option<MasterInfo> >& pid);
 
   // Invoked when the contender has lost the candidacy.
   // Made public for testing purposes.
-  void lostCandidacy(const Future<Nothing>& lost);
+  void lostCandidacy(const process::Future<Nothing>& lost);
+
+  // Continuation of recover().
+  // Made public for testing purposes.
+  process::Future<Nothing> _recover(const Registry& registry);
+
+  // Continuation of reregisterSlave().
+  // Made public for testing purposes.
+  // TODO(vinod): Instead of doing this create and use a
+  // MockRegistrar.
+  // TODO(dhamon): Consider FRIEND_TEST macro from gtest.
+  void _reregisterSlave(
+      const SlaveInfo& slaveInfo,
+      const process::UPID& pid,
+      const std::vector<ExecutorInfo>& executorInfos,
+      const std::vector<Task>& tasks,
+      const std::vector<Archive::Framework>& completedFrameworks,
+      const process::Future<bool>& readmit);
 
   MasterInfo info() const
   {
@@ -191,26 +233,39 @@ public:
 protected:
   virtual void initialize();
   virtual void finalize();
-  virtual void exited(const UPID& pid);
+  virtual void exited(const process::UPID& pid);
+  virtual void visit(const process::MessageEvent& event);
 
-  void deactivate(Framework* framework);
+  // Recovers state from the registrar.
+  process::Future<Nothing> recover();
+  void recoveredSlavesTimeout(const Registry& registry);
+
+  void _registerSlave(
+      const SlaveInfo& slaveInfo,
+      const process::UPID& pid,
+      const process::Future<bool>& admit);
+
+  void __reregisterSlave(
+      Slave* slave,
+      const std::vector<Task>& tasks);
 
   // 'promise' is used to signal finish of authentication.
   // 'future' is the future returned by the authenticator.
   void _authenticate(
-      const UPID& pid,
-      const Owned<Promise<Nothing> >& promise,
-      const Future<bool>& future);
+      const process::UPID& pid,
+      const process::Owned<process::Promise<Nothing> >& promise,
+      const process::Future<Option<std::string> >& future);
 
-  void authenticationTimeout(Future<bool> future);
+  void authenticationTimeout(process::Future<Option<std::string> > future);
 
-  void fileAttached(const Future<Nothing>& result, const std::string& path);
+  void fileAttached(const process::Future<Nothing>& result,
+                    const std::string& path);
 
   // Return connected frameworks that are not in the process of being removed
   std::vector<Framework*> getActiveFrameworks() const;
 
   // Invoked when the contender has entered the contest.
-  void contended(const Future<Future<Nothing> >& candidacy);
+  void contended(const process::Future<process::Future<Nothing> >& candidacy);
 
   // Reconciles a re-registering slave's tasks / executors and sends
   // TASK_LOST updates for tasks known to the master but unknown to
@@ -225,25 +280,35 @@ protected:
 
   // Replace the scheduler for a framework with a new process ID, in
   // the event of a scheduler failover.
-  void failoverFramework(Framework* framework, const UPID& newPid);
+  void failoverFramework(Framework* framework, const process::UPID& newPid);
 
   // Kill all of a framework's tasks, delete the framework object, and
   // reschedule offers that were assigned to this framework.
   void removeFramework(Framework* framework);
 
-  // Remove a framework from the slave, i.e., kill all of its tasks,
-  // remove its offers and reallocate its resources.
+  // Remove a framework from the slave, i.e., remove its tasks and
+  // executors and recover the resources.
   void removeFramework(Slave* slave, Framework* framework);
+
+  // TODO(adam-mesos): Rename deactivate to disconnect, or v.v.
+  void deactivate(Framework* framework);
+  void disconnect(Slave* slave);
 
   // Add a slave.
   void addSlave(Slave* slave, bool reregister = false);
 
-  void readdSlave(Slave* slave,
-		  const std::vector<ExecutorInfo>& executorInfos,
-		  const std::vector<Task>& tasks);
+  void readdSlave(
+      Slave* slave,
+      const std::vector<ExecutorInfo>& executorInfos,
+      const std::vector<Task>& tasks,
+      const std::vector<Archive::Framework>& completedFrameworks);
 
-  // Lose all of a slave's tasks and delete the slave object
+  // Remove the slave from the registrar and from the master's state.
   void removeSlave(Slave* slave);
+  void _removeSlave(
+      const SlaveInfo& slaveInfo,
+      const std::vector<StatusUpdate>& updates,
+      const process::Future<bool>& removed);
 
   // Launch a task from a task description, and returned the consumed
   // resources for the task and possibly it's executor.
@@ -253,6 +318,9 @@ protected:
 
   // Remove a task.
   void removeTask(Task* task);
+
+  // Forwards the update to the framework.
+  Try<Nothing> forward(const StatusUpdate& update, const process::UPID& pid);
 
   // Remove an offer and optionally rescind the offer as well.
   void removeOffer(Offer* offer, bool rescind = false);
@@ -271,26 +339,30 @@ private:
   class Http
   {
   public:
-    Http(const Master& _master) : master(_master) {}
+    explicit Http(const Master& _master) : master(_master) {}
 
     // /master/health
     process::Future<process::http::Response> health(
+        const process::http::Request& request);
+
+    // /master/observe
+    process::Future<process::http::Response> observe(
         const process::http::Request& request);
 
     // /master/redirect
     process::Future<process::http::Response> redirect(
         const process::http::Request& request);
 
-    // /master/stats.json
-    process::Future<process::http::Response> stats(
+    // /master/roles.json
+    process::Future<process::http::Response> roles(
         const process::http::Request& request);
 
     // /master/state.json
     process::Future<process::http::Response> state(
         const process::http::Request& request);
 
-    // /master/roles.json
-    process::Future<process::http::Response> roles(
+    // /master/stats.json
+    process::Future<process::http::Response> stats(
         const process::http::Request& request);
 
     // /master/tasks.json
@@ -298,6 +370,7 @@ private:
         const process::http::Request& request);
 
     const static std::string HEALTH_HELP;
+    const static std::string OBSERVE_HELP;
     const static std::string REDIRECT_HELP;
     const static std::string TASKS_HELP;
 
@@ -308,8 +381,6 @@ private:
   Master(const Master&);              // No copying.
   Master& operator = (const Master&); // No assigning.
 
-  friend struct SlaveRegistrar;
-  friend struct SlaveReregistrar;
   friend struct OfferVisitor;
 
   const Flags flags;
@@ -325,6 +396,7 @@ private:
   allocator::Allocator* allocator;
   WhitelistWatcher* whitelistWatcher;
   Registrar* registrar;
+  Repairer* repairer;
   Files* files;
 
   MasterContender* contender;
@@ -332,39 +404,81 @@ private:
 
   MasterInfo info_;
 
-  hashmap<FrameworkID, Framework*> frameworks;
+  // Indicates when recovery is complete. Recovery begins once the
+  // master is elected as a leader.
+  Option<process::Future<Nothing> > recovered;
 
-  hashmap<SlaveID, Slave*> slaves;
+  struct Slaves
+  {
+    Slaves() : deactivated(MAX_DEACTIVATED_SLAVES) {}
 
-  // Ideally we could use SlaveIDs to track deactivated slaves.
-  // However, we would not know when to remove the SlaveID from this
-  // set. After deactivation, the same slave machine can register with
-  // the same. Using PIDs allows us to remove the deactivated
-  // slave PID once any slave registers with the same PID!
-  hashset<UPID> deactivatedSlaves;
+    // Imposes a time limit for slaves that we recover from the
+    // registry to re-register with the master.
+    Option<process::Timer> recoveredTimer;
+
+    // Slaves that have been recovered from the registrar but have yet
+    // to re-register. We keep a "reregistrationTimer" above to ensure
+    // we remove these slaves if they do not re-register.
+    hashset<SlaveID> recovered;
+
+    // Slaves that are in the process of registering.
+    hashset<process::UPID> registering;
+
+    // Only those slaves that are re-registering for the first time
+    // with this master. We must not answer questions related to
+    // these slaves until the registrar determines their fate.
+    hashset<SlaveID> reregistering;
+
+    hashmap<SlaveID, Slave*> activated;
+
+    // Slaves that are in the process of being removed from the
+    // registrar. Think of these as being partially removed: we must
+    // not answer questions related to these until they are removed
+    // from the registry.
+    hashset<SlaveID> removing;
+
+    // We track deactivated slaves to preserve the consistency
+    // semantics of the pre-registrar code when a non-strict registrar
+    // is being used. That is, if we deactivate a slave, we must make
+    // an effort to prevent it from (re-)registering, sending updates,
+    // etc. We keep a cache here to prevent this from growing in an
+    // unbounded manner.
+    // TODO(bmahler): Ideally we could use a cache with set semantics.
+    Cache<SlaveID, Nothing> deactivated;
+  } slaves;
+
+  struct Frameworks
+  {
+    Frameworks() : completed(MAX_COMPLETED_FRAMEWORKS) {}
+
+    hashmap<FrameworkID, Framework*> activated;
+    boost::circular_buffer<memory::shared_ptr<Framework> > completed;
+  } frameworks;
 
   hashmap<OfferID, Offer*> offers;
 
   hashmap<std::string, Role*> roles;
 
-  // Frameworks that are currently in the process of authentication.
-  // 'authenticating' future for a framework is ready when it is
+  // Frameworks/slaves that are currently in the process of authentication.
+  // 'authenticating' future for an authenticatee is ready when it is
   // authenticated.
-  hashmap<UPID, Future<Nothing> > authenticating;
+  hashmap<process::UPID, process::Future<Nothing> > authenticating;
 
-  hashmap<UPID, Owned<sasl::Authenticator> > authenticators;
+  hashmap<process::UPID, process::Owned<sasl::Authenticator> > authenticators;
 
-  // Authenticated frameworks keyed by framework's PID.
-  hashset<UPID> authenticated;
+  // Principals of authenticated frameworks/slaves keyed by PID.
+  hashmap<process::UPID, std::string> authenticated;
 
-  boost::circular_buffer<memory::shared_ptr<Framework> > completedFrameworks;
+  Option<process::Owned<Authorizer> > authorizer;
 
   int64_t nextFrameworkId; // Used to give each framework a unique ID.
   int64_t nextOfferId;     // Used to give each slot offer a unique ID.
   int64_t nextSlaveId;     // Used to give each slave a unique ID.
 
+  // TODO(bmahler): These are deprecated! Please use metrics instead.
   // Statistics (initialized in Master::initialize).
-  struct {
+  struct
+  {
     uint64_t tasks[TaskState_ARRAYSIZE];
     uint64_t validStatusUpdates;
     uint64_t invalidStatusUpdates;
@@ -372,22 +486,152 @@ private:
     uint64_t invalidFrameworkMessages;
   } stats;
 
-  Time startTime; // Start time used to calculate uptime.
+  struct Metrics
+  {
+    Metrics(const Master& master);
+
+    ~Metrics();
+
+    process::metrics::Gauge uptime_secs;
+    process::metrics::Gauge elected;
+
+    process::metrics::Gauge slaves_active;
+    process::metrics::Gauge slaves_inactive;
+
+    process::metrics::Gauge frameworks_active;
+    process::metrics::Gauge frameworks_inactive;
+
+    process::metrics::Gauge outstanding_offers;
+
+    // Task state metrics.
+    process::metrics::Gauge tasks_staging;
+    process::metrics::Gauge tasks_starting;
+    process::metrics::Gauge tasks_running;
+    process::metrics::Counter tasks_finished;
+    process::metrics::Counter tasks_failed;
+    process::metrics::Counter tasks_killed;
+    process::metrics::Counter tasks_lost;
+
+    // Message counters.
+    process::metrics::Counter dropped_messages;
+
+    // Messages from schedulers.
+    process::metrics::Counter messages_register_framework;
+    process::metrics::Counter messages_reregister_framework;
+    process::metrics::Counter messages_unregister_framework;
+    process::metrics::Counter messages_deactivate_framework;
+    process::metrics::Counter messages_kill_task;
+    process::metrics::Counter messages_status_update_acknowledgement;
+    process::metrics::Counter messages_resource_request;
+    process::metrics::Counter messages_launch_tasks;
+    process::metrics::Counter messages_revive_offers;
+    process::metrics::Counter messages_reconcile_tasks;
+    process::metrics::Counter messages_framework_to_executor;
+
+    // Messages from slaves.
+    process::metrics::Counter messages_register_slave;
+    process::metrics::Counter messages_reregister_slave;
+    process::metrics::Counter messages_unregister_slave;
+    process::metrics::Counter messages_status_update;
+    process::metrics::Counter messages_exited_executor;
+
+    // Messages from both schedulers and slaves.
+    process::metrics::Counter messages_authenticate;
+
+    process::metrics::Counter valid_framework_to_executor_messages;
+    process::metrics::Counter invalid_framework_to_executor_messages;
+
+    process::metrics::Counter valid_status_updates;
+    process::metrics::Counter invalid_status_updates;
+
+    process::metrics::Counter valid_status_update_acknowledgements;
+    process::metrics::Counter invalid_status_update_acknowledgements;
+
+    // Recovery counters.
+    process::metrics::Counter recovery_slave_removals;
+
+    // Process metrics.
+    process::metrics::Gauge event_queue_size;
+
+    // Successful registry operations.
+    process::metrics::Counter slave_registrations;
+    process::metrics::Counter slave_reregistrations;
+    process::metrics::Counter slave_removals;
+
+    // Resource metrics.
+    std::vector<process::metrics::Gauge> resources_total;
+    std::vector<process::metrics::Gauge> resources_used;
+    std::vector<process::metrics::Gauge> resources_percent;
+  } metrics;
+
+  // Gauge handlers.
+  double _uptime_secs()
+  {
+    return (process::Clock::now() - startTime).secs();
+  }
+
+  double _elected()
+  {
+    return elected() ? 1 : 0;
+  }
+
+  double _slaves_active();
+
+  double _slaves_inactive();
+
+  double _frameworks_active()
+  {
+    return getActiveFrameworks().size();
+  }
+
+  double _frameworks_inactive()
+  {
+    return frameworks.activated.size() - _frameworks_active();
+  }
+
+  double _outstanding_offers()
+  {
+    return offers.size();
+  }
+
+  double _event_queue_size()
+  {
+    size_t size;
+
+    lock();
+    {
+      size = events.size();
+    }
+    unlock();
+
+    return static_cast<double>(size);
+  }
+
+  double _tasks_staging();
+  double _tasks_starting();
+  double _tasks_running();
+
+  double _resources_total(const std::string& name);
+  double _resources_used(const std::string& name);
+  double _resources_percent(const std::string& name);
+
+  process::Time startTime; // Start time used to calculate uptime.
+
+  Option<process::Time> electedTime; // Time when this master is elected.
 };
 
 
-// A connected slave.
+// A connected (or disconnected, checkpointing) slave.
 struct Slave
 {
   Slave(const SlaveInfo& _info,
         const SlaveID& _id,
-        const UPID& _pid,
-        const Time& time)
+        const process::UPID& _pid,
+        const process::Time& time)
     : id(_id),
       info(_info),
       pid(_pid),
       registeredTime(time),
-      lastHeartbeat(time),
       disconnected(false),
       observer(NULL) {}
 
@@ -453,7 +697,7 @@ struct Slave
   }
 
   bool hasExecutor(const FrameworkID& frameworkId,
-		   const ExecutorID& executorId) const
+                   const ExecutorID& executorId) const
   {
     return executors.contains(frameworkId) &&
       executors.get(frameworkId).get().contains(executorId);
@@ -489,11 +733,10 @@ struct Slave
   const SlaveID id;
   const SlaveInfo info;
 
-  UPID pid;
+  process::UPID pid;
 
-  Time registeredTime;
-  Option<Time> reregisteredTime;
-  Time lastHeartbeat;
+  process::Time registeredTime;
+  Option<process::Time> reregisteredTime;
 
   // We mark a slave 'disconnected' when it has checkpointing
   // enabled because we expect it reregister after recovery.
@@ -526,13 +769,20 @@ private:
 };
 
 
+inline std::ostream& operator << (std::ostream& stream, const Slave& slave)
+{
+  return stream << slave.id << " at " << slave.pid
+                << " (" << slave.info.hostname() << ")";
+}
+
+
 // Information about a connected or completed framework.
 struct Framework
 {
   Framework(const FrameworkInfo& _info,
             const FrameworkID& _id,
-            const UPID& _pid,
-            const Time& time)
+            const process::UPID& _pid,
+            const process::Time& time = process::Clock::now())
     : id(_id),
       info(_info),
       pid(_pid),
@@ -562,13 +812,20 @@ struct Framework
     resources += task->resources();
   }
 
+  void addCompletedTask(const Task& task)
+  {
+    // TODO(adam-mesos): Check if completed task already exists.
+    completedTasks.push_back(memory::shared_ptr<Task>(new Task(task)));
+  }
+
   void removeTask(Task* task)
   {
     CHECK(tasks.contains(task->task_id()))
       << "Unknown task " << task->task_id()
       << " of framework " << task->framework_id();
 
-    completedTasks.push_back(memory::shared_ptr<Task>(new Task(*task)));
+    addCompletedTask(*task);
+
     tasks.erase(task->task_id());
     resources -= task->resources();
   }
@@ -623,16 +880,16 @@ struct Framework
     }
   }
 
-
   const FrameworkID id; // TODO(benh): Store this in 'info'.
+
   const FrameworkInfo info;
 
-  UPID pid;
+  process::UPID pid;
 
   bool active; // Turns false when framework is being removed.
-  Time registeredTime;
-  Time reregisteredTime;
-  Time unregisteredTime;
+  process::Time registeredTime;
+  process::Time reregisteredTime;
+  process::Time unregisteredTime;
 
   hashmap<TaskID, Task*> tasks;
 
@@ -656,7 +913,7 @@ private:
 // Information about an active role.
 struct Role
 {
-  Role(const RoleInfo& _info)
+  explicit Role(const RoleInfo& _info)
     : info(_info) {}
 
   void addFramework(Framework* framework)
@@ -682,6 +939,111 @@ struct Role
   RoleInfo info;
 
   hashmap<FrameworkID, Framework*> frameworks;
+};
+
+
+// Implementation of slave admission Registrar operation.
+class AdmitSlave : public Operation
+{
+public:
+  explicit AdmitSlave(const SlaveInfo& _info) : info(_info)
+  {
+    CHECK(info.has_id()) << "SlaveInfo is missing the 'id' field";
+  }
+
+protected:
+  virtual Try<bool> perform(
+      Registry* registry,
+      hashset<SlaveID>* slaveIDs,
+      bool strict)
+  {
+    // Check and see if this slave already exists.
+    if (slaveIDs->contains(info.id())) {
+      if (strict) {
+        return Error("Slave already admitted");
+      } else {
+        return false; // No mutation.
+      }
+    }
+
+    Registry::Slave* slave = registry->mutable_slaves()->add_slaves();
+    slave->mutable_info()->CopyFrom(info);
+    slaveIDs->insert(info.id());
+    return true; // Mutation.
+  }
+
+private:
+  const SlaveInfo info;
+};
+
+
+// Implementation of slave readmission Registrar operation.
+class ReadmitSlave : public Operation
+{
+public:
+  explicit ReadmitSlave(const SlaveInfo& _info) : info(_info)
+  {
+    CHECK(info.has_id()) << "SlaveInfo is missing the 'id' field";
+  }
+
+protected:
+  virtual Try<bool> perform(
+      Registry* registry,
+      hashset<SlaveID>* slaveIDs,
+      bool strict)
+  {
+    if (slaveIDs->contains(info.id())) {
+      return false; // No mutation.
+    }
+
+    if (strict) {
+      return Error("Slave not yet admitted");
+    } else {
+      Registry::Slave* slave = registry->mutable_slaves()->add_slaves();
+      slave->mutable_info()->CopyFrom(info);
+      slaveIDs->insert(info.id());
+      return true; // Mutation.
+    }
+  }
+
+private:
+  const SlaveInfo info;
+};
+
+
+// Implementation of slave removal Registrar operation.
+class RemoveSlave : public Operation
+{
+public:
+  explicit RemoveSlave(const SlaveInfo& _info) : info(_info)
+  {
+    CHECK(info.has_id()) << "SlaveInfo is missing the 'id' field";
+  }
+
+protected:
+  virtual Try<bool> perform(
+      Registry* registry,
+      hashset<SlaveID>* slaveIDs,
+      bool strict)
+  {
+    for (int i = 0; i < registry->slaves().slaves().size(); i++) {
+      const Registry::Slave& slave = registry->slaves().slaves(i);
+      if (slave.info().id() == info.id()) {
+        registry->mutable_slaves()->mutable_slaves()->DeleteSubrange(i, 1);
+        slaveIDs->erase(info.id());
+        return true; // Mutation.
+      }
+    }
+
+    if (strict) {
+      return Error("Slave not yet admitted");
+    } else {
+      return false; // No mutation.
+    }
+  }
+
+private:
+  const SlaveInfo info;
 };
 
 } // namespace master {

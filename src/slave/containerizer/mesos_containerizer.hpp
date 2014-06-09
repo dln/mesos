@@ -40,6 +40,8 @@ class MesosContainerizerProcess;
 class MesosContainerizer : public Containerizer
 {
 public:
+  static Try<MesosContainerizer*> create(const Flags& flags, bool local);
+
   MesosContainerizer(
       const Flags& flags,
       bool local,
@@ -60,6 +62,16 @@ public:
       const process::PID<Slave>& slavePid,
       bool checkpoint);
 
+  virtual process::Future<Nothing> launch(
+      const ContainerID& containerId,
+      const TaskInfo& taskInfo,
+      const ExecutorInfo& executorInfo,
+      const std::string& directory,
+      const Option<std::string>& user,
+      const SlaveID& slaveId,
+      const process::PID<Slave>& slavePid,
+      bool checkpoint);
+
   virtual process::Future<Nothing> update(
       const ContainerID& containerId,
       const Resources& resources);
@@ -67,7 +79,7 @@ public:
   virtual process::Future<ResourceStatistics> usage(
       const ContainerID& containerId);
 
-  virtual process::Future<Containerizer::Termination> wait(
+  virtual process::Future<containerizer::Termination> wait(
       const ContainerID& containerId);
 
   virtual void destroy(const ContainerID& containerId);
@@ -79,7 +91,8 @@ private:
 };
 
 
-class MesosContainerizerProcess : public process::Process<MesosContainerizerProcess>
+class MesosContainerizerProcess
+  : public process::Process<MesosContainerizerProcess>
 {
 public:
   MesosContainerizerProcess(
@@ -106,6 +119,16 @@ public:
       const process::PID<Slave>& slavePid,
       bool checkpoint);
 
+  process::Future<Nothing> launch(
+      const ContainerID& containerId,
+      const TaskInfo& taskInfo,
+      const ExecutorInfo& executorInfo,
+      const std::string& directory,
+      const Option<std::string>& user,
+      const SlaveID& slaveId,
+      const process::PID<Slave>& slavePid,
+      bool checkpoint);
+
   process::Future<Nothing> update(
       const ContainerID& containerId,
       const Resources& resources);
@@ -113,7 +136,7 @@ public:
   process::Future<ResourceStatistics> usage(
       const ContainerID& containerId);
 
-  process::Future<Containerizer::Termination> wait(
+  process::Future<containerizer::Termination> wait(
       const ContainerID& containerId);
 
   void destroy(const ContainerID& containerId);
@@ -124,7 +147,7 @@ private:
   process::Future<Nothing> _recover(
       const std::list<state::RunState>& recovered);
 
-  process::Future<Nothing> prepare(
+  process::Future<std::list<Option<CommandInfo> > > prepare(
       const ContainerID& containerId,
       const ExecutorInfo& executorInfo,
       const std::string& directory,
@@ -136,21 +159,19 @@ private:
       const std::string& directory,
       const Option<std::string>& user);
 
-  process::Future<pid_t> fork(
+  process::Future<Nothing> _launch(
       const ContainerID& containerId,
       const ExecutorInfo& executorInfo,
-      const lambda::function<int()>& inChild,
+      const std::string& directory,
+      const Option<std::string>& user,
       const SlaveID& slaveId,
+      const process::PID<Slave>& slavePid,
       bool checkpoint,
-      int pipeRead);
+      const std::list<Option<CommandInfo> >& scripts);
 
   process::Future<Nothing> isolate(
       const ContainerID& containerId,
       pid_t _pid);
-
-  process::Future<Nothing> _isolate(
-      const ContainerID& containerId,
-      const std::list<Option<CommandInfo> >& commands);
 
   process::Future<Nothing> exec(
       const ContainerID& containerId,
@@ -161,11 +182,17 @@ private:
       const ContainerID& containerId,
       const process::Future<Nothing>& future);
 
-  // Continues (and completes) '_destroy()' once we get the exit status of the
-  // executor.
+  // Continues '_destroy()' once we get the exit status of the executor.
   void __destroy(
       const ContainerID& containerId,
       const process::Future<Option<int > >& status);
+
+  // Continues (and completes) '__destroy()' once all isolators have completed
+  // cleanup.
+  void ___destroy(
+      const ContainerID& containerId,
+      const process::Future<Option<int > >& status,
+      const process::Future<std::list<Nothing> >& futures);
 
   // Call back for when an isolator limits a container and impacts the
   // processes. This will trigger container destruction.
@@ -186,7 +213,7 @@ private:
   // struct.
   // Promises for futures returned from wait().
   hashmap<ContainerID,
-    process::Owned<process::Promise<Containerizer::Termination> > > promises;
+    process::Owned<process::Promise<containerizer::Termination> > > promises;
 
   // We need to keep track of the future exit status for each executor because
   // we'll only get a single notification when the executor exits.

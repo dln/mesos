@@ -86,7 +86,8 @@ void execute(const string& script)
 
     // Start by cd'ing into the temporary directory.
     if (!os::chdir(directory.get())) {
-      std::cerr << "Failed to chdir to '" << directory.get() << "'" << std::endl;
+      std::cerr << "Failed to chdir to '" << directory.get() << "'"
+                << std::endl;
       abort();
     }
 
@@ -105,6 +106,9 @@ void execute(const string& script)
     os::setenv("MESOS_BUILD_DIR", flags.build_dir);
     os::setenv("MESOS_WEBUI_DIR", path::join(flags.source_dir, "src", "webui"));
     os::setenv("MESOS_LAUNCHER_DIR", path::join(flags.build_dir, "src"));
+
+    // Enable replicated log based registry.
+    os::setenv("MESOS_REGISTRY", "replicated_log");
 
     // Enable authentication.
     os::setenv("MESOS_AUTHENTICATE", "true");

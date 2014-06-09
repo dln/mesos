@@ -18,6 +18,8 @@
 
 #include <gmock/gmock.h>
 
+#include <stdint.h>
+
 #include <list>
 #include <set>
 #include <string>
@@ -67,7 +69,6 @@ using namespace process;
 using std::list;
 using std::set;
 using std::string;
-using std::vector;
 
 using testing::_;
 using testing::Eq;
@@ -594,9 +595,8 @@ TEST_F(CoordinatorTest, Elect)
 
   {
     Future<Option<uint64_t> > electing = coord.elect();
-    AWAIT_READY_FOR(electing, Seconds(10));
-    ASSERT_SOME(electing.get());
-    EXPECT_EQ(0u, electing.get().get());
+    AWAIT_READY(electing);
+    EXPECT_SOME_EQ(0u, electing.get());
   }
 
   {
@@ -607,6 +607,41 @@ TEST_F(CoordinatorTest, Elect)
     ASSERT_TRUE(actions.get().front().has_type());
     ASSERT_EQ(Action::NOP, actions.get().front().type());
   }
+}
+
+
+// Verifies that a coordinator can get elected with clock paused (no
+// retry involved) for an empty log.
+TEST_F(CoordinatorTest, ElectWithClockPaused)
+{
+  Clock::pause();
+
+  const string path1 = os::getcwd() + "/.log1";
+  initializer.flags.path = path1;
+  initializer.execute();
+
+  const string path2 = os::getcwd() + "/.log2";
+  initializer.flags.path = path2;
+  initializer.execute();
+
+  Shared<Replica> replica1(new Replica(path1));
+  Shared<Replica> replica2(new Replica(path2));
+
+  set<UPID> pids;
+  pids.insert(replica1->pid());
+  pids.insert(replica2->pid());
+
+  Shared<Network> network(new Network(pids));
+
+  Coordinator coord(2, replica1, network);
+
+  {
+    Future<Option<uint64_t> > electing = coord.elect();
+    AWAIT_READY(electing);
+    EXPECT_SOME_EQ(0u, electing.get());
+  }
+
+  Clock::resume();
 }
 
 
@@ -633,17 +668,17 @@ TEST_F(CoordinatorTest, AppendRead)
 
   {
     Future<Option<uint64_t> > electing = coord.elect();
-    AWAIT_READY_FOR(electing, Seconds(10));
-    ASSERT_SOME(electing.get());
-    EXPECT_EQ(0u, electing.get().get());
+    AWAIT_READY(electing);
+    EXPECT_SOME_EQ(0u, electing.get());
   }
 
   uint64_t position;
 
   {
-    Future<uint64_t> appending = coord.append("hello world");
-    AWAIT_READY_FOR(appending, Seconds(10));
-    position = appending.get();
+    Future<Option<uint64_t> > appending = coord.append("hello world");
+    AWAIT_READY(appending);
+    ASSERT_SOME(appending.get());
+    position = appending.get().get();
     EXPECT_EQ(1u, position);
   }
 
@@ -682,17 +717,17 @@ TEST_F(CoordinatorTest, AppendReadError)
 
   {
     Future<Option<uint64_t> > electing = coord.elect();
-    AWAIT_READY_FOR(electing, Seconds(10));
-    ASSERT_SOME(electing.get());
-    EXPECT_EQ(0u, electing.get().get());
+    AWAIT_READY(electing);
+    EXPECT_SOME_EQ(0u, electing.get());
   }
 
   uint64_t position;
 
   {
-    Future<uint64_t> appending = coord.append("hello world");
-    AWAIT_READY_FOR(appending, Seconds(10));
-    position = appending.get();
+    Future<Option<uint64_t> > appending = coord.append("hello world");
+    AWAIT_READY(appending);
+    ASSERT_SOME(appending.get());
+    position = appending.get().get();
     EXPECT_EQ(1u, position);
   }
 
@@ -701,6 +736,55 @@ TEST_F(CoordinatorTest, AppendReadError)
     Future<list<Action> > actions = replica1->read(position, position);
     AWAIT_FAILED(actions);
     EXPECT_EQ("Bad read range (past end of log)", actions.failure());
+  }
+}
+
+
+TEST_F(CoordinatorTest, AppendDiscarded)
+{
+  const string path1 = os::getcwd() + "/.log1";
+  initializer.flags.path = path1;
+  initializer.execute();
+
+  const string path2 = os::getcwd() + "/.log2";
+  initializer.flags.path = path2;
+  initializer.execute();
+
+  Shared<Replica> replica1(new Replica(path1));
+  Shared<Replica> replica2(new Replica(path2));
+
+  set<UPID> pids;
+  pids.insert(replica1->pid());
+  pids.insert(replica2->pid());
+
+  Shared<Network> network(new Network(pids));
+
+  Coordinator coord(2, replica1, network);
+
+  {
+    Future<Option<uint64_t> > electing = coord.elect();
+    AWAIT_READY(electing);
+    ASSERT_SOME(electing.get());
+    EXPECT_EQ(0u, electing.get().get());
+  }
+
+  process::terminate(replica2->pid());
+  process::wait(replica2->pid());
+  replica2.reset();
+
+  {
+    Future<Option<uint64_t> > appending = coord.append("hello world");
+    ASSERT_TRUE(appending.isPending());
+
+    appending.discard();
+    AWAIT_DISCARDED(appending);
+  }
+
+  {
+    Future<Option<uint64_t> > appending = coord.append("hello moto");
+    AWAIT_READY(appending);
+
+    EXPECT_NONE(appending.get());
   }
 }
 
@@ -756,9 +840,8 @@ TEST_F(CoordinatorTest, AppendNoQuorum)
 
   {
     Future<Option<uint64_t> > electing = coord.elect();
-    AWAIT_READY_FOR(electing, Seconds(10));
-    ASSERT_SOME(electing.get());
-    EXPECT_EQ(0u, electing.get().get());
+    AWAIT_READY(electing);
+    EXPECT_SOME_EQ(0u, electing.get());
   }
 
   process::terminate(replica2->pid());
@@ -767,7 +850,7 @@ TEST_F(CoordinatorTest, AppendNoQuorum)
 
   Clock::pause();
 
-  Future<uint64_t> appending = coord.append("hello world");
+  Future<Option<uint64_t> > appending = coord.append("hello world");
 
   Clock::advance(Seconds(10));
   Clock::settle();
@@ -801,17 +884,17 @@ TEST_F(CoordinatorTest, Failover)
 
   {
     Future<Option<uint64_t> > electing = coord1.elect();
-    AWAIT_READY_FOR(electing, Seconds(10));
-    ASSERT_SOME(electing.get());
-    EXPECT_EQ(0u, electing.get().get());
+    AWAIT_READY(electing);
+    EXPECT_SOME_EQ(0u, electing.get());
   }
 
   uint64_t position;
 
   {
-    Future<uint64_t> appending = coord1.append("hello world");
-    AWAIT_READY_FOR(appending, Seconds(10));
-    position = appending.get();
+    Future<Option<uint64_t> > appending = coord1.append("hello world");
+    AWAIT_READY(appending);
+    ASSERT_SOME(appending.get());
+    position = appending.get().get();
     EXPECT_EQ(1u, position);
   }
 
@@ -821,9 +904,8 @@ TEST_F(CoordinatorTest, Failover)
 
   {
     Future<Option<uint64_t> > electing = coord2.elect();
-    AWAIT_READY_FOR(electing, Seconds(10));
-    ASSERT_SOME(electing.get());
-    EXPECT_EQ(position, electing.get().get());
+    AWAIT_READY(electing);
+    EXPECT_SOME_EQ(position, electing.get());
   }
 
   {
@@ -861,17 +943,17 @@ TEST_F(CoordinatorTest, Demoted)
 
   {
     Future<Option<uint64_t> > electing = coord1.elect();
-    AWAIT_READY_FOR(electing, Seconds(10));
-    ASSERT_SOME(electing.get());
-    EXPECT_EQ(0u, electing.get().get());
+    AWAIT_READY(electing);
+    EXPECT_SOME_EQ(0u, electing.get());
   }
 
   uint64_t position;
 
   {
-    Future<uint64_t> appending = coord1.append("hello world");
-    AWAIT_READY_FOR(appending, Seconds(10));
-    position = appending.get();
+    Future<Option<uint64_t> > appending = coord1.append("hello world");
+    AWAIT_READY(appending);
+    ASSERT_SOME(appending.get());
+    position = appending.get().get();
     EXPECT_EQ(1u, position);
   }
 
@@ -881,21 +963,21 @@ TEST_F(CoordinatorTest, Demoted)
 
   {
     Future<Option<uint64_t> > electing = coord2.elect();
-    AWAIT_READY_FOR(electing, Seconds(10));
-    ASSERT_SOME(electing.get());
-    EXPECT_EQ(position, electing.get().get());
+    AWAIT_READY(electing);
+    EXPECT_SOME_EQ(position, electing.get());
   }
 
   {
-    Future<uint64_t> appending = coord1.append("hello moto");
-    AWAIT_FAILED(appending);
-    EXPECT_EQ("Coordinator demoted", appending.failure());
+    Future<Option<uint64_t> > appending = coord1.append("hello moto");
+    AWAIT_READY(appending);
+    EXPECT_NONE(appending.get());
   }
 
   {
-    Future<uint64_t> appending = coord2.append("hello hello");
-    AWAIT_READY_FOR(appending, Seconds(10));
-    position = appending.get();
+    Future<Option<uint64_t> > appending = coord2.append("hello hello");
+    AWAIT_READY(appending);
+    ASSERT_SOME(appending.get());
+    position = appending.get().get();
     EXPECT_EQ(2u, position);
   }
 
@@ -938,17 +1020,17 @@ TEST_F(CoordinatorTest, Fill)
 
   {
     Future<Option<uint64_t> > electing = coord1.elect();
-    AWAIT_READY_FOR(electing, Seconds(10));
-    ASSERT_SOME(electing.get());
-    EXPECT_EQ(0u, electing.get().get());
+    AWAIT_READY(electing);
+    EXPECT_SOME_EQ(0u, electing.get());
   }
 
   uint64_t position;
 
   {
-    Future<uint64_t> appending = coord1.append("hello world");
-    AWAIT_READY_FOR(appending, Seconds(10));
-    position = appending.get();
+    Future<Option<uint64_t> > appending = coord1.append("hello world");
+    AWAIT_READY(appending);
+    ASSERT_SOME(appending.get());
+    position = appending.get().get();
     EXPECT_EQ(1u, position);
   }
 
@@ -963,14 +1045,16 @@ TEST_F(CoordinatorTest, Fill)
   Coordinator coord2(2, replica3, network2);
 
   {
+    // Note that the first election should fail because 'coord2' get's
+    // it's proposal number from 'replica3' which is any empty log and
+    // thus a second attempt will need to be made.
     Future<Option<uint64_t> > electing = coord2.elect();
-    AWAIT_READY_FOR(electing, Seconds(10));
+    AWAIT_READY(electing);
     ASSERT_NONE(electing.get());
 
     electing = coord2.elect();
-    AWAIT_READY_FOR(electing, Seconds(10));
-    ASSERT_SOME(electing.get());
-    EXPECT_EQ(position, electing.get().get());
+    AWAIT_READY(electing);
+    EXPECT_SOME_EQ(position, electing.get());
   }
 
   {
@@ -1016,17 +1100,17 @@ TEST_F(CoordinatorTest, NotLearnedFill)
 
   {
     Future<Option<uint64_t> > electing = coord1.elect();
-    AWAIT_READY_FOR(electing, Seconds(10));
-    ASSERT_SOME(electing.get());
-    EXPECT_EQ(0u, electing.get().get());
+    AWAIT_READY(electing);
+    EXPECT_SOME_EQ(0u, electing.get());
   }
 
   uint64_t position;
 
   {
-    Future<uint64_t> appending = coord1.append("hello world");
-    AWAIT_READY_FOR(appending, Seconds(10));
-    position = appending.get();
+    Future<Option<uint64_t> > appending = coord1.append("hello world");
+    AWAIT_READY(appending);
+    ASSERT_SOME(appending.get());
+    position = appending.get().get();
     EXPECT_EQ(1u, position);
   }
 
@@ -1041,14 +1125,16 @@ TEST_F(CoordinatorTest, NotLearnedFill)
   Coordinator coord2(2, replica3, network2);
 
   {
+    // Note that the first election should fail because 'coord2' get's
+    // it's proposal number from 'replica3' which is any empty log and
+    // thus a second attempt will need to be made.
     Future<Option<uint64_t> > electing = coord2.elect();
-    AWAIT_READY_FOR(electing, Seconds(10));
+    AWAIT_READY(electing);
     ASSERT_NONE(electing.get());
 
     electing = coord2.elect();
-    AWAIT_READY_FOR(electing, Seconds(10));
-    ASSERT_SOME(electing.get());
-    EXPECT_EQ(position, electing.get().get());
+    AWAIT_READY(electing);
+    EXPECT_SOME_EQ(position, electing.get());
   }
 
   {
@@ -1086,15 +1172,14 @@ TEST_F(CoordinatorTest, MultipleAppends)
 
   {
     Future<Option<uint64_t> > electing = coord.elect();
-    AWAIT_READY_FOR(electing, Seconds(10));
-    ASSERT_SOME(electing.get());
-    EXPECT_EQ(0u, electing.get().get());
+    AWAIT_READY(electing);
+    EXPECT_SOME_EQ(0u, electing.get());
   }
 
   for (uint64_t position = 1; position <= 10; position++) {
-    Future<uint64_t> appending = coord.append(stringify(position));
-    AWAIT_READY_FOR(appending, Seconds(10));
-    EXPECT_EQ(position, appending.get());
+    Future<Option<uint64_t> > appending = coord.append(stringify(position));
+    AWAIT_READY(appending);
+    EXPECT_SOME_EQ(position, appending.get());
   }
 
   {
@@ -1141,15 +1226,14 @@ TEST_F(CoordinatorTest, MultipleAppendsNotLearnedFill)
 
   {
     Future<Option<uint64_t> > electing = coord1.elect();
-    AWAIT_READY_FOR(electing, Seconds(10));
-    ASSERT_SOME(electing.get());
-    EXPECT_EQ(0u, electing.get().get());
+    AWAIT_READY(electing);
+    EXPECT_SOME_EQ(0u, electing.get());
   }
 
   for (uint64_t position = 1; position <= 10; position++) {
-    Future<uint64_t> appending = coord1.append(stringify(position));
-    AWAIT_READY_FOR(appending, Seconds(10));
-    EXPECT_EQ(position, appending.get());
+    Future<Option<uint64_t> > appending = coord1.append(stringify(position));
+    AWAIT_READY(appending);
+    EXPECT_SOME_EQ(position, appending.get());
   }
 
   Shared<Replica> replica3(new Replica(path3));
@@ -1163,14 +1247,16 @@ TEST_F(CoordinatorTest, MultipleAppendsNotLearnedFill)
   Coordinator coord2(2, replica3, network2);
 
   {
+    // Note that the first election should fail because 'coord2' get's
+    // it's proposal number from 'replica3' which is any empty log and
+    // thus a second attempt will need to be made.
     Future<Option<uint64_t> > electing = coord2.elect();
-    AWAIT_READY_FOR(electing, Seconds(10));
+    AWAIT_READY(electing);
     ASSERT_NONE(electing.get());
 
     electing = coord2.elect();
-    AWAIT_READY_FOR(electing, Seconds(10));
-    ASSERT_SOME(electing.get());
-    EXPECT_EQ(10u, electing.get().get());
+    AWAIT_READY(electing);
+    EXPECT_SOME_EQ(10u, electing.get());
   }
 
   {
@@ -1209,21 +1295,20 @@ TEST_F(CoordinatorTest, Truncate)
 
   {
     Future<Option<uint64_t> > electing = coord.elect();
-    AWAIT_READY_FOR(electing, Seconds(10));
-    ASSERT_SOME(electing.get());
-    EXPECT_EQ(0u, electing.get().get());
+    AWAIT_READY(electing);
+    EXPECT_SOME_EQ(0u, electing.get());
   }
 
   for (uint64_t position = 1; position <= 10; position++) {
-    Future<uint64_t> appending = coord.append(stringify(position));
-    AWAIT_READY_FOR(appending, Seconds(10));
-    EXPECT_EQ(position, appending.get());
+    Future<Option<uint64_t> > appending = coord.append(stringify(position));
+    AWAIT_READY(appending);
+    EXPECT_SOME_EQ(position, appending.get());
   }
 
   {
-    Future<uint64_t> truncating = coord.truncate(7);
-    AWAIT_READY_FOR(truncating, Seconds(10));
-    EXPECT_EQ(11u, truncating.get());
+    Future<Option<uint64_t> > truncating = coord.truncate(7);
+    AWAIT_READY(truncating);
+    EXPECT_SOME_EQ(11u, truncating.get());
   }
 
   {
@@ -1276,21 +1361,20 @@ TEST_F(CoordinatorTest, TruncateNotLearnedFill)
 
   {
     Future<Option<uint64_t> > electing = coord1.elect();
-    AWAIT_READY_FOR(electing, Seconds(10));
-    ASSERT_SOME(electing.get());
-    EXPECT_EQ(0u, electing.get().get());
+    AWAIT_READY(electing);
+    EXPECT_SOME_EQ(0u, electing.get());
   }
 
   for (uint64_t position = 1; position <= 10; position++) {
-    Future<uint64_t> appending = coord1.append(stringify(position));
-    AWAIT_READY_FOR(appending, Seconds(10));
-    EXPECT_EQ(position, appending.get());
+    Future<Option<uint64_t> > appending = coord1.append(stringify(position));
+    AWAIT_READY(appending);
+    EXPECT_SOME_EQ(position, appending.get());
   }
 
   {
-    Future<uint64_t> truncating = coord1.truncate(7);
-    AWAIT_READY_FOR(truncating, Seconds(10));
-    EXPECT_EQ(11u, truncating.get());
+    Future<Option<uint64_t> > truncating = coord1.truncate(7);
+    AWAIT_READY(truncating);
+    EXPECT_SOME_EQ(11u, truncating.get());
   }
 
   Shared<Replica> replica3(new Replica(path3));
@@ -1304,14 +1388,16 @@ TEST_F(CoordinatorTest, TruncateNotLearnedFill)
   Coordinator coord2(2, replica3, network2);
 
   {
+    // Note that the first election should fail because 'coord2' get's
+    // it's proposal number from 'replica3' which is any empty log and
+    // thus a second attempt will need to be made.
     Future<Option<uint64_t> > electing = coord2.elect();
-    AWAIT_READY_FOR(electing, Seconds(10));
+    AWAIT_READY(electing);
     ASSERT_NONE(electing.get());
 
     electing = coord2.elect();
-    AWAIT_READY_FOR(electing, Seconds(10));
-    ASSERT_SOME(electing.get());
-    EXPECT_EQ(11u, electing.get().get());
+    AWAIT_READY(electing);
+    EXPECT_SOME_EQ(11u, electing.get());
   }
 
   {
@@ -1360,21 +1446,20 @@ TEST_F(CoordinatorTest, TruncateLearnedFill)
 
   {
     Future<Option<uint64_t> > electing = coord1.elect();
-    AWAIT_READY_FOR(electing, Seconds(10));
-    ASSERT_SOME(electing.get());
-    EXPECT_EQ(0u, electing.get().get());
+    AWAIT_READY(electing);
+    EXPECT_SOME_EQ(0u, electing.get());
   }
 
   for (uint64_t position = 1; position <= 10; position++) {
-    Future<uint64_t> appending = coord1.append(stringify(position));
-    AWAIT_READY_FOR(appending, Seconds(10));
-    EXPECT_EQ(position, appending.get());
+    Future<Option<uint64_t> > appending = coord1.append(stringify(position));
+    AWAIT_READY(appending);
+    EXPECT_SOME_EQ(position, appending.get());
   }
 
   {
-    Future<uint64_t> truncating = coord1.truncate(7);
-    AWAIT_READY_FOR(truncating, Seconds(10));
-    EXPECT_EQ(11u, truncating.get());
+    Future<Option<uint64_t> > truncating = coord1.truncate(7);
+    AWAIT_READY(truncating);
+    EXPECT_SOME_EQ(11u, truncating.get());
   }
 
   Shared<Replica> replica3(new Replica(path3));
@@ -1388,14 +1473,16 @@ TEST_F(CoordinatorTest, TruncateLearnedFill)
   Coordinator coord2(2, replica3, network2);
 
   {
+    // Note that the first election should fail because 'coord2' get's
+    // it's proposal number from 'replica3' which is any empty log and
+    // thus a second attempt will need to be made.
     Future<Option<uint64_t> > electing = coord2.elect();
-    AWAIT_READY_FOR(electing, Seconds(10));
+    AWAIT_READY(electing);
     ASSERT_NONE(electing.get());
 
     electing = coord2.elect();
-    AWAIT_READY_FOR(electing, Seconds(10));
-    ASSERT_SOME(electing.get());
-    EXPECT_EQ(11u, electing.get().get());
+    AWAIT_READY(electing);
+    EXPECT_SOME_EQ(11u, electing.get());
   }
 
   {
@@ -1458,15 +1545,14 @@ TEST_F(RecoverTest, RacingCatchup)
 
   {
     Future<Option<uint64_t> > electing = coord1.elect();
-    AWAIT_READY_FOR(electing, Seconds(10));
-    ASSERT_SOME(electing.get());
-    EXPECT_EQ(0u, electing.get().get());
+    AWAIT_READY(electing);
+    EXPECT_SOME_EQ(0u, electing.get());
   }
 
   for (uint64_t position = 1; position <= 10; position++) {
-    Future<uint64_t> appending = coord1.append(stringify(position));
-    AWAIT_READY_FOR(appending, Seconds(10));
-    EXPECT_EQ(position, appending.get());
+    Future<Option<uint64_t> > appending = coord1.append(stringify(position));
+    AWAIT_READY(appending);
+    EXPECT_SOME_EQ(position, appending.get());
   }
 
   // Two replicas both want to recover.
@@ -1485,18 +1571,21 @@ TEST_F(RecoverTest, RacingCatchup)
   AWAIT_READY(recovering4);
   AWAIT_READY(recovering5);
 
-  Shared<Replica> shared4 = recovering4.get().share();
+  Owned<Replica> shared4_ = recovering4.get();
+  Shared<Replica> shared4 = shared4_.share();
   Coordinator coord2(3, shared4, network2);
 
   {
+    // Note that the first election should fail because 'coord2' get's
+    // it's proposal number from 'replica3' which is any empty log and
+    // thus a second attempt will need to be made.
     Future<Option<uint64_t> > electing = coord2.elect();
-    AWAIT_READY_FOR(electing, Seconds(10));
+    AWAIT_READY(electing);
     ASSERT_NONE(electing.get());
 
     electing = coord2.elect();
-    AWAIT_READY_FOR(electing, Seconds(10));
-    ASSERT_SOME(electing.get());
-    EXPECT_EQ(10u, electing.get().get());
+    AWAIT_READY(electing);
+    EXPECT_SOME_EQ(10u, electing.get());
   }
 
   {
@@ -1511,9 +1600,9 @@ TEST_F(RecoverTest, RacingCatchup)
   }
 
   {
-    Future<uint64_t> appending = coord2.append("hello hello");
-    AWAIT_READY_FOR(appending, Seconds(10));
-    EXPECT_EQ(11u, appending.get());
+    Future<Option<uint64_t> > appending = coord2.append("hello hello");
+    AWAIT_READY(appending);
+    EXPECT_SOME_EQ(11u, appending.get());
   }
 
   {
@@ -1556,18 +1645,17 @@ TEST_F(RecoverTest, CatchupRetry)
 
   {
     Future<Option<uint64_t> > electing = coord.elect();
-    AWAIT_READY_FOR(electing, Seconds(10));
-    ASSERT_SOME(electing.get());
-    EXPECT_EQ(0u, electing.get().get());
+    AWAIT_READY(electing);
+    EXPECT_SOME_EQ(0u, electing.get());
   }
 
-  vector<uint64_t> positions;
+  IntervalSet<uint64_t> positions;
 
   for (uint64_t position = 1; position <= 10; position++) {
-    Future<uint64_t> appending = coord.append(stringify(position));
-    AWAIT_READY_FOR(appending, Seconds(10));
-    EXPECT_EQ(position, appending.get());
-    positions.push_back(position);
+    Future<Option<uint64_t> > appending = coord.append(stringify(position));
+    AWAIT_READY(appending);
+    EXPECT_SOME_EQ(position, appending.get());
+    positions += position;
   }
 
   Shared<Replica> replica3(new Replica(path3));
@@ -1610,6 +1698,144 @@ TEST_F(RecoverTest, CatchupRetry)
 }
 
 
+TEST_F(RecoverTest, AutoInitialization)
+{
+  const string path1 = os::getcwd() + "/.log1";
+  const string path2 = os::getcwd() + "/.log2";
+  const string path3 = os::getcwd() + "/.log3";
+
+  Owned<Replica> replica1(new Replica(path1));
+  Owned<Replica> replica2(new Replica(path2));
+  Owned<Replica> replica3(new Replica(path3));
+
+  set<UPID> pids;
+  pids.insert(replica1->pid());
+  pids.insert(replica2->pid());
+  pids.insert(replica3->pid());
+
+  Shared<Network> network(new Network(pids));
+
+  Future<Owned<Replica> > recovering1 = recover(2, replica1, network, true);
+  Future<Owned<Replica> > recovering2 = recover(2, replica2, network, true);
+
+  // Verifies that replica1 and replica2 cannot transit into VOTING
+  // status because replica3 is still in EMPTY status. We flush the
+  // event queue before checking.
+  Clock::pause();
+  Clock::settle();
+  Clock::resume();
+
+  EXPECT_TRUE(recovering1.isPending());
+  EXPECT_TRUE(recovering2.isPending());
+
+  Future<Owned<Replica> > recovering3 = recover(2, replica3, network, true);
+
+  AWAIT_READY(recovering1);
+  AWAIT_READY(recovering2);
+  AWAIT_READY(recovering3);
+
+  Owned<Replica> shared_ = recovering1.get();
+  Shared<Replica> shared = shared_.share();
+
+  Coordinator coord(2, shared, network);
+
+  {
+    Future<Option<uint64_t> > electing = coord.elect();
+    AWAIT_READY(electing);
+    EXPECT_SOME_EQ(0u, electing.get());
+  }
+
+  {
+    Future<Option<uint64_t> > appending = coord.append("hello world");
+    AWAIT_READY(appending);
+    EXPECT_SOME_EQ(1u, appending.get());
+  }
+
+  {
+    Future<list<Action> > actions = shared->read(1, 1);
+    AWAIT_READY(actions);
+    ASSERT_EQ(1u, actions.get().size());
+    EXPECT_EQ(1u, actions.get().front().position());
+    ASSERT_TRUE(actions.get().front().has_type());
+    ASSERT_EQ(Action::APPEND, actions.get().front().type());
+    EXPECT_EQ("hello world", actions.get().front().append().bytes());
+  }
+}
+
+
+TEST_F(RecoverTest, AutoInitializationRetry)
+{
+  const string path1 = os::getcwd() + "/.log1";
+  const string path2 = os::getcwd() + "/.log2";
+  const string path3 = os::getcwd() + "/.log3";
+
+  Owned<Replica> replica1(new Replica(path1));
+  Owned<Replica> replica2(new Replica(path2));
+  Owned<Replica> replica3(new Replica(path3));
+
+  set<UPID> pids;
+  pids.insert(replica1->pid());
+  pids.insert(replica2->pid());
+  pids.insert(replica3->pid());
+
+  Shared<Network> network(new Network(pids));
+
+  // Simulate the case where replica3 is temporarily removed.
+  DROP_MESSAGE(Eq(RecoverRequest().GetTypeName()), _, Eq(replica3->pid()));
+  DROP_MESSAGE(Eq(RecoverRequest().GetTypeName()), _, Eq(replica3->pid()));
+
+  Clock::pause();
+
+  Future<Owned<Replica> > recovering1 = recover(2, replica1, network, true);
+  Future<Owned<Replica> > recovering2 = recover(2, replica2, network, true);
+
+  // Flush the event queue.
+  Clock::settle();
+
+  EXPECT_TRUE(recovering1.isPending());
+  EXPECT_TRUE(recovering2.isPending());
+
+  Future<Owned<Replica> > recovering3 = recover(2, replica3, network, true);
+
+  // Replica1 and replica2 will retry recovery after 10 seconds.
+  Clock::advance(Seconds(10));
+  Clock::settle();
+
+  Clock::resume();
+
+  AWAIT_READY(recovering1);
+  AWAIT_READY(recovering2);
+  AWAIT_READY(recovering3);
+
+  Owned<Replica> shared_ = recovering1.get();
+  Shared<Replica> shared = shared_.share();
+
+  Coordinator coord(2, shared, network);
+
+  {
+    Future<Option<uint64_t> > electing = coord.elect();
+    AWAIT_READY(electing);
+    EXPECT_SOME_EQ(0u, electing.get());
+  }
+
+  {
+    Future<Option<uint64_t> > appending = coord.append("hello world");
+    AWAIT_READY(appending);
+    EXPECT_SOME_EQ(1u, appending.get());
+  }
+
+  {
+    Future<list<Action> > actions = shared->read(1, 1);
+    AWAIT_READY(actions);
+    ASSERT_EQ(1u, actions.get().size());
+    EXPECT_EQ(1u, actions.get().front().position());
+    ASSERT_TRUE(actions.get().front().has_type());
+    ASSERT_EQ(Action::APPEND, actions.get().front().type());
+    EXPECT_EQ("hello world", actions.get().front().append().bytes());
+  }
+}
+
+
 class LogTest : public TemporaryDirectoryTest
 {
 protected:
@@ -1635,21 +1861,27 @@ TEST_F(LogTest, WriteRead)
 
   Log log(2, path2, pids);
 
-  Log::Writer writer(&log, Seconds(10));
+  Log::Writer writer(&log);
 
-  Result<Log::Position> position =
-    writer.append("hello world", Timeout::in(Seconds(10)));
+  Future<Option<Log::Position> > start = writer.start();
 
-  ASSERT_SOME(position);
+  AWAIT_READY(start);
+  ASSERT_SOME(start.get());
+
+  Future<Option<Log::Position> > position = writer.append("hello world");
+
+  AWAIT_READY(position);
+  ASSERT_SOME(position.get());
 
   Log::Reader reader(&log);
 
-  Result<list<Log::Entry> > entries =
-    reader.read(position.get(), position.get(), Timeout::in(Seconds(10)));
+  Future<list<Log::Entry> > entries =
+    reader.read(position.get().get(), position.get().get());
 
-  ASSERT_SOME(entries);
+  AWAIT_READY(entries);
+
   ASSERT_EQ(1u, entries.get().size());
-  EXPECT_EQ(position.get(), entries.get().front().position);
+  EXPECT_EQ(position.get().get(), entries.get().front().position);
   EXPECT_EQ("hello world", entries.get().front().data);
 }
 
@@ -1671,14 +1903,21 @@ TEST_F(LogTest, Position)
 
   Log log(2, path2, pids);
 
-  Log::Writer writer(&log, Seconds(10));
+  Log::Writer writer(&log);
 
-  Result<Log::Position> position =
-    writer.append("hello world", Timeout::in(Seconds(10)));
+  Future<Option<Log::Position> > start = writer.start();
 
-  ASSERT_SOME(position);
+  AWAIT_READY(start);
+  ASSERT_SOME(start.get());
 
-  ASSERT_EQ(position.get(), log.position(position.get().identity()));
+  Future<Option<Log::Position> > position = writer.append("hello world");
+
+  AWAIT_READY(position);
+  ASSERT_SOME(position.get());
+
+  ASSERT_EQ(
+      position.get().get(),
+      log.position(position.get().get().identity()));
 }
 
 
@@ -1744,21 +1983,65 @@ TEST_F(LogZooKeeperTest, WriteRead)
   Log log1(2, path1, servers, NO_TIMEOUT, "/log/", None());
   Log log2(2, path2, servers, NO_TIMEOUT, "/log/", None());
 
-  Log::Writer writer(&log2, Seconds(10));
+  Log::Writer writer(&log2);
 
-  Result<Log::Position> position =
-    writer.append("hello world", Timeout::in(Seconds(10)));
+  Future<Option<Log::Position> > start = writer.start();
 
-  ASSERT_SOME(position);
+  AWAIT_READY(start);
+  ASSERT_SOME(start.get());
+
+  Future<Option<Log::Position> > position = writer.append("hello world");
+
+  AWAIT_READY(position);
+  ASSERT_SOME(position.get());
 
   Log::Reader reader(&log2);
 
-  Result<list<Log::Entry> > entries =
-    reader.read(position.get(), position.get(), Timeout::in(Seconds(10)));
+  Future<list<Log::Entry> > entries =
+    reader.read(position.get().get(), position.get().get());
 
-  ASSERT_SOME(entries);
+  AWAIT_READY(entries);
+
   ASSERT_EQ(1u, entries.get().size());
-  EXPECT_EQ(position.get(), entries.get().front().position);
+  EXPECT_EQ(position.get().get(), entries.get().front().position);
+  EXPECT_EQ("hello world", entries.get().front().data);
+}
+
+
+TEST_F(LogZooKeeperTest, LostZooKeeper)
+{
+  const string path = os::getcwd() + "/.log";
+  const string servers = server->connectString();
+
+  // We reply on auto-initialization to initialize the log.
+  Log log(1, path, servers, NO_TIMEOUT, "/log/", None(), true);
+
+  Log::Writer writer(&log);
+
+  Future<Option<Log::Position> > start = writer.start();
+
+  AWAIT_READY(start);
+  ASSERT_SOME(start.get());
+
+  // Shutdown ZooKeeper network.
+  server->shutdownNetwork();
+
+  // We should still be able to append as the local replica is in the
+  // base set of the ZooKeeper network.
+  Future<Option<Log::Position> > position = writer.append("hello world");
+
+  AWAIT_READY(position);
+  ASSERT_SOME(position.get());
+
+  Log::Reader reader(&log);
+
+  Future<list<Log::Entry> > entries =
+    reader.read(position.get().get(), position.get().get());
+
+  AWAIT_READY(entries);
+
+  ASSERT_EQ(1u, entries.get().size());
+  EXPECT_EQ(position.get().get(), entries.get().front().position);
   EXPECT_EQ("hello world", entries.get().front().data);
 }
 #endif // MESOS_HAS_JAVA

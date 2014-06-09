@@ -16,6 +16,8 @@
  * limitations under the License.
  */
 
+#include <stdint.h>
+
 #include <vector>
 
 #include <mesos/values.hpp>
@@ -54,12 +56,14 @@ namespace internal {
 namespace slave {
 
 // CPU subsystem constants.
-// TODO(vinod): Use uint64_t instead of size_t for shares.
-const size_t CPU_SHARES_PER_CPU = 1024;
-const size_t MIN_CPU_SHARES = 10;
+const uint64_t CPU_SHARES_PER_CPU = 1024;
+const uint64_t MIN_CPU_SHARES = 10;
 const Duration CPU_CFS_PERIOD = Milliseconds(100); // Linux default.
 const Duration MIN_CPU_CFS_QUOTA = Milliseconds(1);
 
+
+template<class T>
+static Future<Option<T> > none() { return None(); }
 
 CgroupsCpushareIsolatorProcess::CgroupsCpushareIsolatorProcess(
     const Flags& _flags,
@@ -163,6 +167,13 @@ Future<Nothing> CgroupsCpushareIsolatorProcess::recover(
   }
 
   foreach (const string& orphan, orphans.get()) {
+    // Ignore the slave cgroup (see the --slave_subsystems flag).
+    // TODO(idownes): Remove this when the cgroups layout is updated,
+    // see MESOS-1185.
+    if (orphan == path::join(flags.cgroups_root, "slave")) {
+      continue;
+    }
+
     if (!cgroups.contains(orphan)) {
       LOG(INFO) << "Removing orphaned cgroup"
                 << " '" << path::join("cpu", orphan) << "'";
@@ -181,6 +192,13 @@ Future<Nothing> CgroupsCpushareIsolatorProcess::recover(
   }
 
   foreach (const string& orphan, orphans.get()) {
+    // Ignore the slave cgroup (see the --slave_subsystems flag).
+    // TODO(idownes): Remove this when the cgroups layout is updated,
+    // see MESOS-1185.
+    if (orphan == path::join(flags.cgroups_root, "slave")) {
+      continue;
+    }
+
     if (!cgroups.contains(orphan)) {
       LOG(INFO) << "Removing orphaned cgroup"
                 << " '" << path::join("cpuacct", orphan) << "'";
@@ -192,7 +210,7 @@ Future<Nothing> CgroupsCpushareIsolatorProcess::recover(
 }
 
 
-Future<Nothing> CgroupsCpushareIsolatorProcess::prepare(
+Future<Option<CommandInfo> > CgroupsCpushareIsolatorProcess::prepare(
     const ContainerID& containerId,
     const ExecutorInfo& executorInfo)
 {
@@ -241,11 +259,12 @@ Future<Nothing> CgroupsCpushareIsolatorProcess::prepare(
     }
   }
 
-  return update(containerId, executorInfo.resources());
+  return update(containerId, executorInfo.resources())
+    .then(lambda::bind(none<CommandInfo>));
 }
 
 
-Future<Option<CommandInfo> > CgroupsCpushareIsolatorProcess::isolate(
+Future<Nothing> CgroupsCpushareIsolatorProcess::isolate(
     const ContainerID& containerId,
     pid_t pid)
 {
@@ -276,7 +295,7 @@ Future<Option<CommandInfo> > CgroupsCpushareIsolatorProcess::isolate(
     return Failure("Failed to isolate container: " + assign.error());
   }
 
-  return None();
+  return Nothing();
 }
 
 
@@ -316,8 +335,8 @@ Future<Nothing> CgroupsCpushareIsolatorProcess::update(
   double cpus = resources.cpus().get();
 
   // Always set cpu.shares.
-  size_t shares =
-    std::max((size_t) (CPU_SHARES_PER_CPU * cpus), MIN_CPU_SHARES);
+  uint64_t shares =
+    std::max((uint64_t) (CPU_SHARES_PER_CPU * cpus), MIN_CPU_SHARES);
 
   Try<Nothing> write = cgroups::cpu::shares(
       hierarchy.get(), info->cgroup, shares);
@@ -383,11 +402,12 @@ Future<ResourceStatistics> CgroupsCpushareIsolatorProcess::usage(
 
   // TODO(bmahler): Add namespacing to cgroups to enforce the expected
   // structure, e.g., cgroups::cpuacct::stat.
-  if (stat.get().contains("user") && stat.get().contains("system")) {
-    result.set_cpus_user_time_secs(
-        (double) stat.get()["user"] / (double) ticks);
-    result.set_cpus_system_time_secs(
-        (double) stat.get()["system"] / (double) ticks);
+  Option<uint64_t> user = stat.get().get("user");
+  Option<uint64_t> system = stat.get().get("system");
+
+  if (user.isSome() && system.isSome()) {
+    result.set_cpus_user_time_secs((double) user.get() / (double) ticks);
+    result.set_cpus_system_time_secs((double) system.get() / (double) ticks);
   }
 
   // Add the cpu.stat information.
@@ -397,19 +417,20 @@ Future<ResourceStatistics> CgroupsCpushareIsolatorProcess::usage(
     return Failure("Failed to read cpu.stat: " + stat.error());
   }
 
-  if (stat.get().contains("nr_periods")) {
-    result.set_cpus_nr_periods(
-        (uint32_t) stat.get()["nr_periods"]);
+  Option<uint64_t> nr_periods = stat.get().get("nr_periods");
+  if (nr_periods.isSome()) {
+    result.set_cpus_nr_periods(nr_periods.get());
   }
 
-  if (stat.get().contains("nr_throttled")) {
-    result.set_cpus_nr_throttled(
-        (uint32_t) stat.get()["nr_throttled"]);
+  Option<uint64_t> nr_throttled = stat.get().get("nr_throttled");
+  if (nr_throttled.isSome()) {
+    result.set_cpus_nr_throttled(nr_throttled.get());
   }
 
-  if (stat.get().contains("throttled_time")) {
+  Option<uint64_t> throttled_time = stat.get().get("throttled_time");
+  if (throttled_time.isSome()) {
     result.set_cpus_throttled_time_secs(
-        Nanoseconds(stat.get()["throttled_time"]).secs());
+        Nanoseconds(throttled_time.get()).secs());
   }
 
   return result;

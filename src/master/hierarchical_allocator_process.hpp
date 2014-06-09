@@ -58,7 +58,7 @@ struct Slave
 {
   Slave() {}
 
-  Slave(const SlaveInfo& _info)
+  explicit Slave(const SlaveInfo& _info)
     : available(_info.resources()),
       connected(true),
       whitelisted(false),
@@ -90,7 +90,7 @@ struct Framework
 {
   Framework() {}
 
-  Framework(const FrameworkInfo& _info)
+  explicit Framework(const FrameworkInfo& _info)
     : checkpoint(_info.checkpoint()),
       info(_info) {}
 
@@ -207,7 +207,7 @@ protected:
   bool initialized;
 
   Flags flags;
-  PID<Master> master;
+  process::PID<Master> master;
 
   // Contains all frameworks.
   hashmap<FrameworkID, Framework> frameworks;
@@ -245,7 +245,7 @@ public:
   RefusedFilter(
       const SlaveID& _slaveId,
       const Resources& _resources,
-      const Timeout& _timeout)
+      const process::Timeout& _timeout)
     : slaveId(_slaveId), resources(_resources), timeout(_timeout) {}
 
   virtual bool filter(const SlaveID& slaveId, const Resources& resources)
@@ -257,18 +257,18 @@ public:
 
   const SlaveID slaveId;
   const Resources resources;
-  const Timeout timeout;
+  const process::Timeout timeout;
 };
 
 
 template <class RoleSorter, class FrameworkSorter>
-HierarchicalAllocatorProcess<RoleSorter, FrameworkSorter>::HierarchicalAllocatorProcess()
-  : ProcessBase(ID::generate("hierarchical-allocator")),
+HierarchicalAllocatorProcess<RoleSorter, FrameworkSorter>::HierarchicalAllocatorProcess() // NOLINT(whitespace/line_length)
+  : ProcessBase(process::ID::generate("hierarchical-allocator")),
     initialized(false) {}
 
 
 template <class RoleSorter, class FrameworkSorter>
-HierarchicalAllocatorProcess<RoleSorter, FrameworkSorter>::~HierarchicalAllocatorProcess()
+HierarchicalAllocatorProcess<RoleSorter, FrameworkSorter>::~HierarchicalAllocatorProcess() // NOLINT(whitespace/line_length)
 {}
 
 
@@ -276,8 +276,7 @@ template <class RoleSorter, class FrameworkSorter>
 process::PID<HierarchicalAllocatorProcess<RoleSorter, FrameworkSorter> >
 HierarchicalAllocatorProcess<RoleSorter, FrameworkSorter>::self()
 {
-  return
-    process::PID<HierarchicalAllocatorProcess<RoleSorter, FrameworkSorter> >(this);
+  return process::PID<HierarchicalAllocatorProcess<RoleSorter, FrameworkSorter> >(this); // NOLINT(whitespace/line_length)
 }
 
 
@@ -593,7 +592,7 @@ HierarchicalAllocatorProcess<RoleSorter, FrameworkSorter>::resourcesUnused(
 
     // Create a new filter and delay it's expiration.
     Filter* filter =
-      new RefusedFilter(slaveId, resources, Timeout::in(seconds));
+      new RefusedFilter(slaveId, resources, process::Timeout::in(seconds));
 
     frameworks[frameworkId].filters.insert(filter);
 

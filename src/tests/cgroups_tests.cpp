@@ -39,9 +39,11 @@
 
 #include <stout/gtest.hpp>
 #include <stout/hashmap.hpp>
+#include <stout/numify.hpp>
 #include <stout/option.hpp>
 #include <stout/os.hpp>
 #include <stout/path.hpp>
+#include <stout/proc.hpp>
 #include <stout/stringify.hpp>
 #include <stout/strings.hpp>
 
@@ -53,6 +55,7 @@ using namespace mesos::internal::tests;
 
 using namespace process;
 
+using std::set;
 
 class CgroupsTest : public ::testing::Test
 {
@@ -145,6 +148,16 @@ protected:
               ->test_case_name() << ".*).\n"
           << "-------------------------------------------------------------";
       }
+
+      Try<std::vector<std::string> > cgroups = cgroups::get(hierarchy);
+      CHECK_SOME(cgroups);
+
+      foreach (const std::string& cgroup, cgroups.get()) {
+        // Remove any cgroups that start with TEST_CGROUPS_ROOT.
+        if (cgroup == TEST_CGROUPS_ROOT) {
+          AWAIT_READY(cgroups::destroy(hierarchy, cgroup));
+        }
+      }
     }
   }
 
@@ -180,12 +193,12 @@ public:
 };
 
 
-class CgroupsAnyHierarchyWithCpuMemoryFreezerTest
+class CgroupsAnyHierarchyWithFreezerTest
   : public CgroupsAnyHierarchyTest
 {
 public:
-  CgroupsAnyHierarchyWithCpuMemoryFreezerTest()
-    : CgroupsAnyHierarchyTest("cpu,memory,freezer") {}
+  CgroupsAnyHierarchyWithFreezerTest()
+    : CgroupsAnyHierarchyTest("freezer") {}
 };
 
 
@@ -417,7 +430,10 @@ TEST_F(CgroupsAnyHierarchyTest, ROOT_CGROUPS_Write)
 
   // In parent process.
   ASSERT_SOME(
-      cgroups::write(hierarchy, TEST_CGROUPS_ROOT, "cgroup.procs", stringify(pid)));
+      cgroups::write(hierarchy,
+                     TEST_CGROUPS_ROOT,
+                     "cgroup.procs",
+                     stringify(pid)));
 
   Try<std::set<pid_t> > pids = cgroups::processes(hierarchy, TEST_CGROUPS_ROOT);
   ASSERT_SOME(pids);
@@ -469,14 +485,14 @@ TEST_F(CgroupsAnyHierarchyWithCpuAcctMemoryTest, ROOT_CGROUPS_Stat)
   ASSERT_SOME(result);
   EXPECT_TRUE(result.get().contains("user"));
   EXPECT_TRUE(result.get().contains("system"));
-  EXPECT_GT(result.get()["user"], 0llu);
-  EXPECT_GT(result.get()["system"], 0llu);
+  EXPECT_GT(result.get().get("user").get(), 0llu);
+  EXPECT_GT(result.get().get("system").get(), 0llu);
 
   result = cgroups::stat(
       path::join(baseHierarchy, "memory"), "/", "memory.stat");
   ASSERT_SOME(result);
   EXPECT_TRUE(result.get().contains("rss"));
-  EXPECT_GT(result.get()["rss"], 0llu);
+  EXPECT_GT(result.get().get("rss").get(), 0llu);
 }
 
 
@@ -573,7 +589,7 @@ TEST_F(CgroupsAnyHierarchyWithCpuMemoryTest, ROOT_CGROUPS_Listen)
 }
 
 
-TEST_F(CgroupsAnyHierarchyWithCpuMemoryFreezerTest, ROOT_CGROUPS_Freeze)
+TEST_F(CgroupsAnyHierarchyWithFreezerTest, ROOT_CGROUPS_Freeze)
 {
   int pipes[2];
   int dummy;
@@ -643,7 +659,7 @@ TEST_F(CgroupsAnyHierarchyWithCpuMemoryFreezerTest, ROOT_CGROUPS_Freeze)
 }
 
 
-TEST_F(CgroupsAnyHierarchyWithCpuMemoryFreezerTest, ROOT_CGROUPS_Kill)
+TEST_F(CgroupsAnyHierarchyWithFreezerTest, ROOT_CGROUPS_Kill)
 {
   int pipes[2];
   int dummy;
@@ -709,7 +725,7 @@ TEST_F(CgroupsAnyHierarchyWithCpuMemoryFreezerTest, ROOT_CGROUPS_Kill)
 
 
 // TODO(benh): Write a version of this test with nested cgroups.
-TEST_F(CgroupsAnyHierarchyWithCpuMemoryFreezerTest, ROOT_CGROUPS_Destroy)
+TEST_F(CgroupsAnyHierarchyWithFreezerTest, ROOT_CGROUPS_Destroy)
 {
   int pipes[2];
   int dummy;
@@ -773,4 +789,66 @@ TEST_F(CgroupsAnyHierarchyWithCpuMemoryFreezerTest, ROOT_CGROUPS_Destroy)
     std::cerr << "Reach an unreachable statement!" << std::endl;
     abort();
   }
+}
+
+
+void* threadFunction(void*)
+{
+  // Newly created threads have PTHREAD_CANCEL_ENABLE and
+  // PTHREAD_CANCEL_DEFERRED so they can be cancelled from the main thread.
+  while (true) { sleep(1); }
+
+  return NULL;
+}
+
+
+TEST_F(CgroupsAnyHierarchyWithFreezerTest, ROOT_CGROUPS_AssignThreads)
+{
+  size_t numThreads = 5;
+
+  pthread_t pthreads[numThreads];
+
+  // Create additional threads.
+  for (size_t i = 0; i < numThreads; i++)
+  {
+    EXPECT_EQ(0, pthread_create(&pthreads[i], NULL, threadFunction, NULL));
+  }
+
+  std::string hierarchy = path::join(baseHierarchy, "freezer");
+  ASSERT_SOME(cgroups::create(hierarchy, TEST_CGROUPS_ROOT));
+
+  // Check the test cgroup is initially empty.
+  Try<set<pid_t> > cgroupThreads =
+    cgroups::threads(hierarchy, TEST_CGROUPS_ROOT);
+  EXPECT_SOME(cgroupThreads);
+  EXPECT_EQ(0u, cgroupThreads.get().size());
+
+  // Assign ourselves to the test cgroup.
+  CHECK_SOME(cgroups::assign(hierarchy, TEST_CGROUPS_ROOT, ::getpid()));
+
+  // Get our threads (may be more than the numThreads we created if
+  // other threads are running).
+  Try<set<pid_t> > threads = proc::threads(::getpid());
+  ASSERT_SOME(threads);
+
+  // Check the test cgroup now only contains all child threads.
+  cgroupThreads = cgroups::threads(hierarchy, TEST_CGROUPS_ROOT);
+  EXPECT_SOME(cgroupThreads);
+  EXPECT_SOME_EQ(threads.get(), cgroupThreads);
+
+  // Terminate the additional threads.
+  for (size_t i = 0; i < numThreads; i++)
+  {
+    EXPECT_EQ(0, pthread_cancel(pthreads[i]));
+    EXPECT_EQ(0, pthread_join(pthreads[i], NULL));
+  }
+
+  // Move ourselves to the root cgroup.
+  CHECK_SOME(cgroups::assign(hierarchy, "", ::getpid()));
+
+  // Destroy the cgroup.
+  Future<bool> future = cgroups::destroy(hierarchy, TEST_CGROUPS_ROOT);
+  future.await(Seconds(5));
+  ASSERT_TRUE(future.isReady());
+  EXPECT_TRUE(future.get());
 }

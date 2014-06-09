@@ -23,7 +23,7 @@ namespace zookeeper {
 class LeaderDetectorProcess : public Process<LeaderDetectorProcess>
 {
 public:
-  LeaderDetectorProcess(Group* group);
+  explicit LeaderDetectorProcess(Group* group);
   virtual ~LeaderDetectorProcess();
   virtual void initialize();
 
@@ -97,7 +97,8 @@ void LeaderDetectorProcess::watch(const set<Group::Membership>& expected)
 }
 
 
-void LeaderDetectorProcess::watched(const Future<set<Group::Membership> >& memberships)
+void LeaderDetectorProcess::watched(
+    const Future<set<Group::Membership> >& memberships)
 {
   CHECK(!memberships.isDiscarded());
 

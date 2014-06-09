@@ -53,6 +53,11 @@
 #include "slave/slave.hpp"
 
 #include "tests/cluster.hpp"
+#include "tests/utils.hpp"
+
+#ifdef MESOS_HAS_JAVA
+#include "tests/zookeeper.hpp"
+#endif // MESOS_HAS_JAVA
 
 namespace mesos {
 namespace internal {
@@ -62,7 +67,7 @@ namespace tests {
 class MockExecutor;
 
 
-class MesosTest : public ::testing::Test
+class MesosTest : public TemporaryDirectoryTest
 {
 protected:
   MesosTest(const Option<zookeeper::URL>& url = None());
@@ -113,19 +118,19 @@ protected:
   // Starts a slave with the specified containerizer, detector and flags.
   virtual Try<process::PID<slave::Slave> > StartSlave(
       slave::Containerizer* containerizer,
-      process::Owned<MasterDetector> detector,
+      MasterDetector* detector,
       const Option<slave::Flags>& flags = None());
 
   // Starts a slave with the specified MasterDetector and flags.
   virtual Try<process::PID<slave::Slave> > StartSlave(
-      process::Owned<MasterDetector> detector,
+      MasterDetector* detector,
       const Option<slave::Flags>& flags = None());
 
   // Starts a slave with the specified mock executor, MasterDetector
   // and flags.
   virtual Try<process::PID<slave::Slave> > StartSlave(
       MockExecutor* executor,
-      process::Owned<MasterDetector> detector,
+      MasterDetector* detector,
       const Option<slave::Flags>& flags = None());
 
   // Stop the specified master.
@@ -184,7 +189,6 @@ private:
 
   // Set of cgroup subsystems used by the cgroups related tests.
   hashset<std::string> subsystems;
-
 };
 #else
 template<>
@@ -194,6 +198,54 @@ protected:
   virtual slave::Flags CreateSlaveFlags();
 };
 #endif // __linux__
+
+
+#ifdef MESOS_HAS_JAVA
+
+class MesosZooKeeperTest : public MesosTest
+{
+public:
+  static void SetUpTestCase()
+  {
+    // Make sure the JVM is created.
+    ZooKeeperTest::SetUpTestCase();
+
+    // Launch the ZooKeeper test server.
+    server = new ZooKeeperTestServer();
+    server->startNetwork();
+
+    Try<zookeeper::URL> parse = zookeeper::URL::parse(
+        "zk://" + server->connectString() + "/znode");
+    ASSERT_SOME(parse);
+
+    url = parse.get();
+  }
+
+  static void TearDownTestCase()
+  {
+    delete server;
+    server = NULL;
+  }
+
+protected:
+  MesosZooKeeperTest() : MesosTest(url) {}
+
+  virtual master::Flags CreateMasterFlags()
+  {
+    master::Flags flags = MesosTest::CreateMasterFlags();
+
+    // NOTE: Since we are using the replicated log with ZooKeeper
+    // (default storage in MesosTest), we need to specify the quorum.
+    flags.quorum = 1;
+
+    return flags;
+  }
+
+  static ZooKeeperTestServer* server;
+  static Option<zookeeper::URL> url;
+};
+
+#endif // MESOS_HAS_JAVA
 
 
 // Macros to get/create (default) ExecutorInfos and FrameworkInfos.
@@ -211,12 +263,6 @@ protected:
         executor; })
 
 
-#define DEFAULT_FRAMEWORK_INFO                                          \
-     ({ FrameworkInfo framework;                                        \
-        framework.set_name("default");                                  \
-        framework; })
-
-
 #define DEFAULT_CREDENTIAL                                             \
      ({ Credential credential;                                         \
         credential.set_principal("test-principal");                    \
@@ -224,22 +270,45 @@ protected:
         credential; })
 
 
-#define DEFAULT_EXECUTOR_ID						\
+#define DEFAULT_FRAMEWORK_INFO                                          \
+     ({ FrameworkInfo framework;                                        \
+        framework.set_name("default");                                  \
+        framework.set_principal(DEFAULT_CREDENTIAL.principal());        \
+        framework; })
+
+
+#define DEFAULT_EXECUTOR_ID           \
       DEFAULT_EXECUTOR_INFO.executor_id()
 
 
+#define CREATE_COMMAND_INFO(command)                                  \
+  ({ CommandInfo commandInfo;                                         \
+     commandInfo.set_value(command);                                  \
+     commandInfo; })
+
+
+// TODO(bmahler): Refactor this to make the distinction between
+// command tasks and executor tasks clearer.
 inline TaskInfo createTask(
     const Offer& offer,
     const std::string& command,
+    const Option<mesos::ExecutorID>& executorId = None(),
     const std::string& name = "test-task",
     const std::string& id = UUID::random().toString())
 {
   TaskInfo task;
   task.set_name(name);
   task.mutable_task_id()->set_value(id);
-  task.mutable_slave_id()->MergeFrom(offer.slave_id());
-  task.mutable_resources()->MergeFrom(offer.resources());
-  task.mutable_command()->set_value(command);
+  task.mutable_slave_id()->CopyFrom(offer.slave_id());
+  task.mutable_resources()->CopyFrom(offer.resources());
+  if (executorId.isSome()) {
+    ExecutorInfo executor;
+    executor.mutable_executor_id()->CopyFrom(executorId.get());
+    executor.mutable_command()->set_value(command);
+    task.mutable_executor()->CopyFrom(executor);
+  } else {
+    task.mutable_command()->set_value(command);
+  }
 
   return task;
 }
@@ -651,18 +720,18 @@ public:
     : cpus(_cpus), mem(_mem) {}
 
   virtual bool MatchAndExplain(const std::vector<Offer>& offers,
-			       ::testing::MatchResultListener* listener) const
+                               ::testing::MatchResultListener* listener) const
   {
     double totalCpus = 0;
     double totalMem = 0;
 
     foreach (const Offer& offer, offers) {
       foreach (const Resource& resource, offer.resources()) {
-	if (resource.name() == "cpus") {
-	  totalCpus += resource.scalar().value();
-	} else if (resource.name() == "mem") {
-	  totalMem += resource.scalar().value();
-	}
+        if (resource.name() == "cpus") {
+          totalCpus += resource.scalar().value();
+        } else if (resource.name() == "mem") {
+          totalMem += resource.scalar().value();
+        }
       }
     }
 
@@ -691,7 +760,8 @@ private:
 };
 
 
-inline const ::testing::Matcher<const std::vector<Offer>& > OfferEq(int cpus, int mem)
+inline
+const ::testing::Matcher<const std::vector<Offer>& > OfferEq(int cpus, int mem)
 {
   return MakeMatcher(new OfferEqMatcher(cpus, mem));
 }

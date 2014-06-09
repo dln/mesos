@@ -5,10 +5,13 @@ ACLOCAL_AMFLAGS = -I m4
 AUTOMAKE_OPTIONS = foreign
 
 EXTRA_DIST =					\
+  include/stout/abort.hpp			\
+  include/stout/base64.hpp			\
   include/stout/bytes.hpp			\
   include/stout/cache.hpp			\
   include/stout/check.hpp			\
   include/stout/duration.hpp			\
+  include/stout/dynamiclibrary.hpp		\
   include/stout/error.hpp			\
   include/stout/exit.hpp			\
   include/stout/fatal.hpp			\
@@ -25,6 +28,7 @@ EXTRA_DIST =					\
   include/stout/gzip.hpp			\
   include/stout/hashmap.hpp			\
   include/stout/hashset.hpp			\
+  include/stout/interval.hpp			\
   include/stout/json.hpp			\
   include/stout/lambda.hpp			\
   include/stout/linkedhashmap.hpp		\
@@ -38,6 +42,7 @@ EXTRA_DIST =					\
   include/stout/numify.hpp			\
   include/stout/option.hpp			\
   include/stout/os.hpp				\
+  include/stout/os/execenv.hpp			\
   include/stout/os/exists.hpp			\
   include/stout/os/fork.hpp			\
   include/stout/os/killtree.hpp			\
@@ -47,7 +52,9 @@ EXTRA_DIST =					\
   include/stout/os/process.hpp			\
   include/stout/os/read.hpp			\
   include/stout/os/sendfile.hpp			\
+  include/stout/os/shell.hpp			\
   include/stout/os/signals.hpp			\
+  include/stout/os/permissions.hpp		\
   include/stout/os/pstree.hpp			\
   include/stout/os/sysctl.hpp			\
   include/stout/path.hpp			\
@@ -62,20 +69,26 @@ EXTRA_DIST =					\
   include/stout/strings.hpp			\
   include/stout/thread.hpp			\
   include/stout/try.hpp				\
+  include/stout/tuple.hpp			\
   include/stout/unreachable.hpp			\
   include/stout/utils.hpp			\
   include/stout/uuid.hpp			\
+  tests/base64_tests.cpp			\
   tests/bytes_tests.cpp				\
+  tests/cache_tests.cpp				\
   tests/duration_tests.cpp			\
+  tests/dynamiclibrary_tests.cpp		\
   tests/error_tests.cpp				\
   tests/flags_tests.cpp				\
   tests/gzip_tests.cpp				\
   tests/hashmap_tests.cpp			\
   tests/hashset_tests.cpp			\
+  tests/interval_tests.cpp			\
   tests/json_tests.cpp				\
   tests/linkedhashmap_tests.cpp			\
   tests/main.cpp				\
   tests/multimap_tests.cpp			\
+  tests/net_tests.cpp				\
   tests/none_tests.cpp				\
   tests/option_tests.cpp			\
   tests/os_tests.cpp				\
@@ -90,4 +103,5 @@ EXTRA_DIST =					\
   tests/some_tests.cpp				\
   tests/strings_tests.cpp			\
   tests/thread_tests.cpp			\
+  tests/utils.hpp				\
   tests/uuid_tests.cpp

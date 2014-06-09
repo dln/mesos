@@ -3,6 +3,7 @@
 #include <google/protobuf/io/zero_copy_stream_impl.h> // For ArrayInputStream.
 
 #include <queue>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -33,6 +34,8 @@
 
 using namespace process;
 
+// Note that we don't add 'using std::set' here because we need
+// 'std::' to disambiguate the 'set' member.
 using std::queue;
 using std::string;
 using std::vector;
@@ -42,6 +45,104 @@ using zookeeper::Authentication;
 namespace mesos {
 namespace internal {
 namespace state {
+
+
+class ZooKeeperStorageProcess : public Process<ZooKeeperStorageProcess>
+{
+public:
+  ZooKeeperStorageProcess(
+      const string& servers,
+      const Duration& timeout,
+      const string& znode,
+      const Option<Authentication>& auth);
+  virtual ~ZooKeeperStorageProcess();
+
+  virtual void initialize();
+
+  // Storage implementation.
+  Future<Option<Entry> > get(const string& name);
+  Future<bool> set(const Entry& entry, const UUID& uuid);
+  virtual Future<bool> expunge(const Entry& entry);
+  Future<std::set<string> > names();
+
+  // ZooKeeper events.
+  // Note that events from previous sessions are dropped.
+  void connected(int64_t sessionId, bool reconnect);
+  void reconnecting(int64_t sessionId);
+  void expired(int64_t sessionId);
+  void updated(int64_t sessionId, const string& path);
+  void created(int64_t sessionId, const string& path);
+  void deleted(int64_t sessionId, const string& path);
+
+private:
+  // Helpers for getting the names, fetching, and swapping.
+  Result<std::set<string> > doNames();
+  Result<Option<Entry> > doGet(const string& name);
+  Result<bool> doSet(const Entry& entry, const UUID& uuid);
+  Result<bool> doExpunge(const Entry& entry);
+
+  const string servers;
+
+  // The session timeout requested by the client.
+  const Duration timeout;
+
+  const string znode;
+
+  Option<Authentication> auth; // ZooKeeper authentication.
+
+  const ACL_vector acl; // Default ACL to use.
+
+  Watcher* watcher;
+  ZooKeeper* zk;
+
+  enum State { // ZooKeeper connection state.
+    DISCONNECTED,
+    CONNECTING,
+    CONNECTED,
+  } state;
+
+  struct Names
+  {
+    Promise<std::set<string> > promise;
+  };
+
+  struct Get
+  {
+    explicit Get(const string& _name) : name(_name) {}
+
+    string name;
+    Promise<Option<Entry> > promise;
+  };
+
+  struct Set
+  {
+    Set(const Entry& _entry, const UUID& _uuid) : entry(_entry), uuid(_uuid) {}
+
+    Entry entry;
+    UUID uuid;
+    Promise<bool> promise;
+  };
+
+  struct Expunge
+  {
+    explicit Expunge(const Entry& _entry) : entry(_entry) {}
+
+    Entry entry;
+    Promise<bool> promise;
+  };
+
+  // TODO(benh): Make pending a single queue of "operations" that can
+  // be "invoked" (C++11 lambdas would help).
+  struct {
+    queue<Names*> names;
+    queue<Get*> gets;
+    queue<Set*> sets;
+    queue<Expunge*> expunges;
+  } pending;
+
+  Option<string> error;
+};
+
 
 // Helper for failing a queue of promises.
 template <typename T>
@@ -94,7 +195,7 @@ void ZooKeeperStorageProcess::initialize()
 }
 
 
-Future<vector<string> > ZooKeeperStorageProcess::names()
+Future<std::set<string> > ZooKeeperStorageProcess::names()
 {
   if (error.isSome()) {
     return Failure(error.get());
@@ -104,7 +205,7 @@ Future<vector<string> > ZooKeeperStorageProcess::names()
     return names->promise.future();
   }
 
-  Result<vector<string> > result = doNames();
+  Result<std::set<string> > result = doNames();
 
   if (result.isNone()) { // Try again later.
     Names* names = new Names();
@@ -190,8 +291,12 @@ Future<bool> ZooKeeperStorageProcess::expunge(const Entry& entry)
 }
 
 
-void ZooKeeperStorageProcess::connected(bool reconnect)
+void ZooKeeperStorageProcess::connected(int64_t sessionId, bool reconnect)
 {
+  if (sessionId != zk->getSessionId()) {
+    return;
+  }
+
   if (!reconnect) {
     // Authenticate if necessary (and we are connected for the first
     // time, or after a session expiration).
@@ -211,7 +316,7 @@ void ZooKeeperStorageProcess::connected(bool reconnect)
 
   while (!pending.names.empty()) {
     Names* names = pending.names.front();
-    Result<vector<string> > result = doNames();
+    Result<std::set<string> > result = doNames();
     if (result.isNone()) {
       return; // Try again later.
     } else if (result.isError()) {
@@ -253,14 +358,22 @@ void ZooKeeperStorageProcess::connected(bool reconnect)
 }
 
 
-void ZooKeeperStorageProcess::reconnecting()
+void ZooKeeperStorageProcess::reconnecting(int64_t sessionId)
 {
+  if (sessionId != zk->getSessionId()) {
+    return;
+  }
+
   state = CONNECTING;
 }
 
 
-void ZooKeeperStorageProcess::expired()
+void ZooKeeperStorageProcess::expired(int64_t sessionId)
 {
+  if (sessionId != zk->getSessionId()) {
+    return;
+  }
+
   state = DISCONNECTED;
 
   delete zk;
@@ -270,25 +383,25 @@ void ZooKeeperStorageProcess::expired()
 }
 
 
-void ZooKeeperStorageProcess::updated(const string& path)
+void ZooKeeperStorageProcess::updated(int64_t sessionId, const string& path)
 {
   LOG(FATAL) << "Unexpected ZooKeeper event";
 }
 
 
-void ZooKeeperStorageProcess::created(const string& path)
+void ZooKeeperStorageProcess::created(int64_t sessionId, const string& path)
 {
   LOG(FATAL) << "Unexpected ZooKeeper event";
 }
 
 
-void ZooKeeperStorageProcess::deleted(const string& path)
+void ZooKeeperStorageProcess::deleted(int64_t sessionId, const string& path)
 {
   LOG(FATAL) << "Unexpected ZooKeeper event";
 }
 
 
-Result<vector<string> > ZooKeeperStorageProcess::doNames()
+Result<std::set<string> > ZooKeeperStorageProcess::doNames()
 {
   // Get all children to determine current memberships.
   vector<string> results;
@@ -307,7 +420,7 @@ Result<vector<string> > ZooKeeperStorageProcess::doNames()
   // TODO(benh): It might make sense to "mangle" the names so that we
   // can determine when a znode has incorrectly been added that
   // actually doesn't store an Entry.
-  return results;
+  return std::set<string>(results.begin(), results.end());
 }
 
 
@@ -344,7 +457,8 @@ Result<Option<Entry> > ZooKeeperStorageProcess::doGet(const string& name)
 }
 
 
-Result<bool> ZooKeeperStorageProcess::doSet(const Entry& entry, const UUID& uuid)
+Result<bool> ZooKeeperStorageProcess::doSet(const Entry& entry,
+                                            const UUID& uuid)
 {
   CHECK(error.isNone()) << ": " << error.get();
   CHECK(state == CONNECTED);
@@ -490,6 +604,49 @@ Result<bool> ZooKeeperStorageProcess::doExpunge(const Entry& entry)
   }
 
   return true;
+}
+
+
+ZooKeeperStorage::ZooKeeperStorage(
+    const string& servers,
+    const Duration& timeout,
+    const string& znode,
+    const Option<Authentication>& auth)
+{
+  process = new ZooKeeperStorageProcess(servers, timeout, znode, auth);
+  spawn(process);
+}
+
+
+ZooKeeperStorage::~ZooKeeperStorage()
+{
+  terminate(process);
+  wait(process);
+  delete process;
+}
+
+
+Future<Option<Entry> > ZooKeeperStorage::get(const string& name)
+{
+  return dispatch(process, &ZooKeeperStorageProcess::get, name);
+}
+
+
+Future<bool> ZooKeeperStorage::set(const Entry& entry, const UUID& uuid)
+{
+  return dispatch(process, &ZooKeeperStorageProcess::set, entry, uuid);
+}
+
+
+Future<bool> ZooKeeperStorage::expunge(const Entry& entry)
+{
+  return dispatch(process, &ZooKeeperStorageProcess::expunge, entry);
+}
+
+
+Future<std::set<string> > ZooKeeperStorage::names()
+{
+  return dispatch(process, &ZooKeeperStorageProcess::names);
 }
 
 } // namespace state {

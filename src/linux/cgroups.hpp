@@ -43,6 +43,8 @@ namespace cgroups {
 const unsigned int FREEZE_RETRIES = 50;
 const unsigned int EMPTY_WATCHER_RETRIES = 50;
 
+// Default number of assign attempts when moving threads to a cgroup.
+const unsigned int THREAD_ASSIGN_RETRIES = 100;
 
 // We use the following notations throughout the cgroups code. The notations
 // here are derived from the kernel documentation. More details can be found in
@@ -277,7 +279,18 @@ Try<std::set<pid_t> > processes(
     const std::string& cgroup);
 
 
-// Assign a given process specified by its pid to a given cgroup. This function
+// Return the set of thread IDs in a given cgroup under a given hierarchy. It
+// will return error if the given hierarchy or the given cgroup is not valid.
+// @param   hierarchy   Path to the hierarchy root.
+// @param   cgroup      Path to the cgroup relative to the hierarchy root.
+// @return  The set of thread ids.
+Try<std::set<pid_t> > threads(
+    const std::string& hierarchy,
+    const std::string& cgroup);
+
+
+// Assign a given process specified by its pid to a given cgroup. All threads
+// in the pid's threadgroup will also be moved to the cgroup. This function
 // will return error if the given hierarchy or the given cgroup is not valid.
 // Also, it will return error if the pid has no process associated with it.
 // @param   hierarchy   Path to the hierarchy root.
@@ -402,7 +415,7 @@ namespace cpu {
 Try<Nothing> shares(
     const std::string& hierarchy,
     const std::string& cgroup,
-    size_t shares);
+    uint64_t shares);
 
 
 // Sets the cfs period using cpu.cfs_period_us.

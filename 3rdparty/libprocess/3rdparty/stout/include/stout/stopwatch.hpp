@@ -14,6 +14,7 @@
 #ifndef __STOUT_STOPWATCH_HPP__
 #define __STOUT_STOPWATCH_HPP__
 
+#include <stdint.h>
 #include <time.h>
 
 #ifdef __MACH__
@@ -49,7 +50,7 @@ public:
     running = false;
   }
 
-  Nanoseconds elapsed()
+  Nanoseconds elapsed() const
   {
     if (!running) {
       return Nanoseconds(diff(stopped, started));

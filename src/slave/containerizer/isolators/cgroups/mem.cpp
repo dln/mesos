@@ -16,6 +16,8 @@
  * limitations under the License.
  */
 
+#include <stdint.h>
+
 #include <vector>
 
 #include <mesos/resources.hpp>
@@ -56,6 +58,9 @@ namespace slave {
 // Memory subsystem constants.
 const Bytes MIN_MEMORY = Megabytes(32);
 
+
+template<class T>
+static Future<Option<T> > none() { return None(); }
 
 CgroupsMemIsolatorProcess::CgroupsMemIsolatorProcess(
     const Flags& _flags,
@@ -156,6 +161,13 @@ Future<Nothing> CgroupsMemIsolatorProcess::recover(
   }
 
   foreach (const string& orphan, orphans.get()) {
+    // Ignore the slave cgroup (see the --slave_subsystems flag).
+    // TODO(idownes): Remove this when the cgroups layout is updated,
+    // see MESOS-1185.
+    if (orphan == path::join(flags.cgroups_root, "slave")) {
+      continue;
+    }
+
     if (!cgroups.contains(orphan)) {
       LOG(INFO) << "Removing orphaned cgroup '" << orphan << "'";
       cgroups::destroy(hierarchy, orphan);
@@ -166,7 +178,7 @@ Future<Nothing> CgroupsMemIsolatorProcess::recover(
 }
 
 
-Future<Nothing> CgroupsMemIsolatorProcess::prepare(
+Future<Option<CommandInfo> > CgroupsMemIsolatorProcess::prepare(
     const ContainerID& containerId,
     const ExecutorInfo& executorInfo)
 {
@@ -199,11 +211,12 @@ Future<Nothing> CgroupsMemIsolatorProcess::prepare(
 
   oomListen(containerId);
 
-  return update(containerId, executorInfo.resources());
+  return update(containerId, executorInfo.resources())
+    .then(lambda::bind(none<CommandInfo>));
 }
 
 
-Future<Option<CommandInfo> > CgroupsMemIsolatorProcess::isolate(
+Future<Nothing> CgroupsMemIsolatorProcess::isolate(
     const ContainerID& containerId,
     pid_t pid)
 {
@@ -224,7 +237,7 @@ Future<Option<CommandInfo> > CgroupsMemIsolatorProcess::isolate(
                    "' : " + assign.error());
   }
 
-  return None();
+  return Nothing();
 }
 
 
@@ -336,16 +349,19 @@ Future<ResourceStatistics> CgroupsMemIsolatorProcess::usage(
     return Failure("Failed to read memory.stat: " + stat.error());
   }
 
-  if (stat.get().contains("total_cache")) {
-    result.set_mem_file_bytes(stat.get()["total_cache"]);
+  Option<uint64_t> total_cache = stat.get().get("total_cache");
+  if (total_cache.isSome()) {
+    result.set_mem_file_bytes(total_cache.get());
   }
 
-  if (stat.get().contains("total_rss")) {
-    result.set_mem_anon_bytes(stat.get()["total_rss"]);
+  Option<uint64_t> total_rss = stat.get().get("total_rss");
+  if (total_rss.isSome()) {
+    result.set_mem_anon_bytes(total_rss.get());
   }
 
-  if (stat.get().contains("total_mapped_file")) {
-    result.set_mem_mapped_file_bytes(stat.get()["total_mapped_file"]);
+  Option<uint64_t> total_mapped_file = stat.get().get("total_mapped_file");
+  if (total_mapped_file.isSome()) {
+    result.set_mem_mapped_file_bytes(total_mapped_file.get());
   }
 
   return result;
@@ -416,9 +432,6 @@ void CgroupsMemIsolatorProcess::oomWaited(
     const ContainerID& containerId,
     const Future<uint64_t>& future)
 {
-  LOG(INFO) << "OOM notifier is triggered for container "
-            << containerId;
-
   if (future.isDiscarded()) {
     LOG(INFO) << "Discarded OOM notifier for container "
               << containerId;
@@ -427,6 +440,7 @@ void CgroupsMemIsolatorProcess::oomWaited(
                << containerId << ": " << future.failure();
   } else {
     // Out-of-memory event happened, call the handler.
+    LOG(INFO) << "OOM notifier is triggered for container " << containerId;
     oom(containerId);
   }
 }

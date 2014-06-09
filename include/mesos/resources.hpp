@@ -77,6 +77,7 @@ class Resources
 public:
   Resources() {}
 
+  /*implicit*/
   Resources(const google::protobuf::RepeatedPtrField<Resource>& _resources)
   {
     resources.MergeFrom(_resources);
@@ -303,7 +304,8 @@ public:
   Option<double> cpus() const;
   Option<Bytes> mem() const;
   Option<Bytes> disk() const;
-  Option<Value::Ranges> ports() const; // TODO(vinod): Provide a Ranges abstraction.
+  // TODO(vinod): Provide a Ranges abstraction.
+  Option<Value::Ranges> ports() const;
 
   typedef google::protobuf::RepeatedPtrField<Resource>::iterator
   iterator;

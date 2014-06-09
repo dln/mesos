@@ -125,7 +125,7 @@ Try<SlaveState> SlaveState::recover(
   state.info = slaveInfo.get();
 
   // Find the frameworks.
-  const Try<list<string> >& frameworks = os::glob(
+  Try<list<string> > frameworks = os::glob(
       strings::format(paths::FRAMEWORK_PATH, rootDir, slaveId, "*").get());
 
   if (frameworks.isError()) {
@@ -138,7 +138,7 @@ Try<SlaveState> SlaveState::recover(
     FrameworkID frameworkId;
     frameworkId.set_value(os::basename(path).get());
 
-    const Try<FrameworkState>& framework =
+    Try<FrameworkState> framework =
       FrameworkState::recover(rootDir, slaveId, frameworkId, strict);
 
     if (framework.isError()) {
@@ -208,7 +208,7 @@ Try<FrameworkState> FrameworkState::recover(
     return state;
   }
 
-  const Try<string>& pid = os::read(path);
+  Try<string> pid = os::read(path);
 
   if (pid.isError()) {
     message =
@@ -233,7 +233,7 @@ Try<FrameworkState> FrameworkState::recover(
   state.pid = process::UPID(pid.get());
 
   // Find the executors.
-  const Try<list<string> >& executors = os::glob(strings::format(
+  Try<list<string> > executors = os::glob(strings::format(
       paths::EXECUTOR_PATH, rootDir, slaveId, frameworkId, "*").get());
 
   if (executors.isError()) {
@@ -242,12 +242,12 @@ Try<FrameworkState> FrameworkState::recover(
         ": " + executors.error());
   }
 
-   // Recover the executors.
+  // Recover the executors.
   foreach (const string& path, executors.get()) {
     ExecutorID executorId;
     executorId.set_value(os::basename(path).get());
 
-    const Try<ExecutorState>& executor =
+    Try<ExecutorState> executor =
       ExecutorState::recover(rootDir, slaveId, frameworkId, executorId, strict);
 
     if (executor.isError()) {
@@ -273,6 +273,65 @@ Try<ExecutorState> ExecutorState::recover(
   ExecutorState state;
   state.id = executorId;
   string message;
+
+  // Find the runs.
+  Try<list<string> > runs = os::glob(strings::format(
+      paths::EXECUTOR_RUN_PATH,
+      rootDir,
+      slaveId,
+      frameworkId,
+      executorId,
+      "*").get());
+
+  if (runs.isError()) {
+    return Error("Failed to find runs for executor '" + executorId.value() +
+                 "': " + runs.error());
+  }
+
+  // Recover the runs.
+  foreach (const string& path, runs.get()) {
+    if (os::basename(path).get() == paths::LATEST_SYMLINK) {
+      const Result<string>& latest = os::realpath(path);
+      if (!latest.isSome()) {
+        return Error(
+            "Failed to find latest run of executor '" +
+            executorId.value() + "': " +
+            (latest.isError()
+             ? latest.error()
+             : "No such file or directory"));
+      }
+
+      // Store the ContainerID of the latest executor run.
+      ContainerID containerId;
+      containerId.set_value(os::basename(latest.get()).get());
+      state.latest = containerId;
+    } else {
+      ContainerID containerId;
+      containerId.set_value(os::basename(path).get());
+
+      Try<RunState> run = RunState::recover(
+          rootDir, slaveId, frameworkId, executorId, containerId, strict);
+
+      if (run.isError()) {
+        return Error(
+            "Failed to recover run " + containerId.value() +
+            " of executor '" + executorId.value() +
+            "': " + run.error());
+      }
+
+      state.runs[containerId] = run.get();
+      state.errors += run.get().errors;
+    }
+  }
+
+  // Find the latest executor.
+  // It is possible that we cannot find the "latest" executor if the
+  // slave died before it created the "latest" symlink.
+  if (state.latest.isNone()) {
+    LOG(WARNING) << "Failed to find the latest run of executor '"
+                 << executorId << "' of framework " << frameworkId;
+    return state;
+  }
 
   // Read the executor info.
   const string& path =
@@ -309,65 +368,6 @@ Try<ExecutorState> ExecutorState::recover(
 
   state.info = executorInfo.get();
 
-  // Find the runs.
-  const Try<list<string> >& runs = os::glob(strings::format(
-      paths::EXECUTOR_RUN_PATH,
-      rootDir,
-      slaveId,
-      frameworkId,
-      executorId,
-      "*").get());
-
-  if (runs.isError()) {
-    return Error("Failed to find runs for executor '" + executorId.value() +
-                 "': " + runs.error());
-  }
-
-  // Recover the runs.
-  foreach (const string& path, runs.get()) {
-    if (os::basename(path).get() == paths::LATEST_SYMLINK) {
-      const Result<string>& latest = os::realpath(path);
-      if (!latest.isSome()) {
-        return Error(
-            "Failed to find latest run of executor '" +
-            executorId.value() + "': " +
-            (latest.isError()
-             ? latest.error()
-             : "No such file or directory"));
-      }
-
-      // Store the ContainerID of the latest executor run.
-      ContainerID containerId;
-      containerId.set_value(os::basename(latest.get()).get());
-      state.latest = containerId;
-    } else {
-      ContainerID containerId;
-      containerId.set_value(os::basename(path).get());
-
-      const Try<RunState>& run = RunState::recover(
-          rootDir, slaveId, frameworkId, executorId, containerId, strict);
-
-      if (run.isError()) {
-        return Error(
-            "Failed to recover run " + containerId.value() +
-            " of executor '" + executorId.value() +
-            "': " + run.error());
-      }
-
-      state.runs[containerId] = run.get();
-      state.errors += run.get().errors;
-    }
-  }
-
-  // Find the latest executor.
-  // It is possible that we cannot find the "latest" executor if the
-  // slave died before it created the "latest" symlink.
-  if (state.latest.isNone()) {
-    LOG(WARNING) << "Failed to find the latest run of executor '"
-                 << executorId << "' of framework " << frameworkId;
-    return state;
-  }
-
   return state;
 }
 
@@ -385,7 +385,7 @@ Try<RunState> RunState::recover(
   string message;
 
   // Find the tasks.
-  const Try<list<string> >& tasks = os::glob(strings::format(
+  Try<list<string> > tasks = os::glob(strings::format(
       paths::TASK_PATH,
       rootDir,
       slaveId,
@@ -405,7 +405,7 @@ Try<RunState> RunState::recover(
     TaskID taskId;
     taskId.set_value(os::basename(path).get());
 
-    const Try<TaskState>& task = TaskState::recover(
+    Try<TaskState> task = TaskState::recover(
         rootDir, slaveId, frameworkId, executorId, containerId, taskId, strict);
 
     if (task.isError()) {
@@ -560,7 +560,7 @@ Try<TaskState> TaskState::recover(
   }
 
   // Open the status updates file for reading and writing (for truncating).
-  const Try<int>& fd = os::open(path, O_RDWR);
+  Try<int> fd = os::open(path, O_RDWR);
 
   if (fd.isError()) {
     message = "Failed to open status updates file '" + path +
@@ -578,8 +578,9 @@ Try<TaskState> TaskState::recover(
   // Now, read the updates.
   Result<StatusUpdateRecord> record = None();
   while (true) {
-    // Ignore errors due to partial protobuf read.
-    record = ::protobuf::read<StatusUpdateRecord>(fd.get(), true);
+    // Ignore errors due to partial protobuf read and enable undoing
+    // failed reads by reverting to the previous seek position.
+    record = ::protobuf::read<StatusUpdateRecord>(fd.get(), true, true);
 
     if (!record.isSome()) {
       break;
@@ -616,7 +617,7 @@ Try<TaskState> TaskState::recover(
   }
 
   // Close the updates file.
-  const Try<Nothing>& close = os::close(fd.get());
+  Try<Nothing> close = os::close(fd.get());
 
   if (close.isError()) {
     message = "Failed to close status updates file '" + path +

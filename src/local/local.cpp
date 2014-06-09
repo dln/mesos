@@ -17,8 +17,11 @@
  */
 
 #include <map>
+#include <set>
 #include <sstream>
 #include <vector>
+
+#include <process/pid.hpp>
 
 #include <stout/exit.hpp>
 #include <stout/foreach.hpp>
@@ -39,15 +42,18 @@
 #include "master/hierarchical_allocator_process.hpp"
 #include "master/master.hpp"
 #include "master/registrar.hpp"
+#include "master/repairer.hpp"
 
 #include "slave/containerizer/containerizer.hpp"
 #include "slave/slave.hpp"
 
-#include "state/leveldb.hpp"
+#include "state/in_memory.hpp"
+#include "state/log.hpp"
 #include "state/protobuf.hpp"
 #include "state/storage.hpp"
 
 using namespace mesos::internal;
+using namespace mesos::internal::log;
 
 using mesos::internal::master::allocator::Allocator;
 using mesos::internal::master::allocator::AllocatorProcess;
@@ -56,6 +62,7 @@ using mesos::internal::master::allocator::HierarchicalDRFAllocatorProcess;
 
 using mesos::internal::master::Master;
 using mesos::internal::master::Registrar;
+using mesos::internal::master::Repairer;
 
 using mesos::internal::slave::Containerizer;
 using mesos::internal::slave::Slave;
@@ -64,6 +71,7 @@ using process::PID;
 using process::UPID;
 
 using std::map;
+using std::set;
 using std::string;
 using std::stringstream;
 using std::vector;
@@ -75,9 +83,11 @@ namespace local {
 
 static Allocator* allocator = NULL;
 static AllocatorProcess* allocatorProcess = NULL;
+static Log* log = NULL;
 static state::Storage* storage = NULL;
 static state::protobuf::State* state = NULL;
 static Registrar* registrar = NULL;
+static Repairer* repairer = NULL;
 static Master* master = NULL;
 static map<Containerizer*, Slave*> slaves;
 static StandaloneMasterDetector* detector = NULL;
@@ -112,12 +122,24 @@ PID<Master> launch(const Flags& flags, Allocator* _allocator)
               << "master flags from the environment: " << load.error();
     }
 
-    if (strings::startsWith(flags.registry, "zk://")) {
-      // TODO(benh):
-      EXIT(1) << "ZooKeeper based registry unimplemented";
-    } else if (flags.registry == "local") {
-      storage = new state::LevelDBStorage(
-          path::join(flags.work_dir, "registry"));
+    if (flags.registry == "in_memory") {
+      if (flags.registry_strict) {
+        EXIT(1) << "Cannot use '--registry_strict' when using in-memory storage"
+                << " based registry";
+      }
+      storage = new state::InMemoryStorage();
+    } else if (flags.registry == "replicated_log") {
+      if (flags.work_dir.isNone()) {
+        EXIT(1) << "--work_dir needed for replicated log based registry";
+      }
+
+      // TODO(vinod): Add support for replicated log with ZooKeeper.
+      log = new Log(
+          1,
+          path::join(flags.work_dir.get(), "replicated_log"),
+          set<UPID>(),
+          flags.log_auto_initialize);
+      storage = new state::LogStorage(log);
     } else {
       EXIT(1) << "'" << flags.registry << "' is not a supported"
               << " option for registry persistence";
@@ -126,13 +148,20 @@ PID<Master> launch(const Flags& flags, Allocator* _allocator)
     CHECK_NOTNULL(storage);
 
     state = new state::protobuf::State(storage);
-    registrar = new Registrar(state);
+    registrar = new Registrar(flags, state);
+    repairer = new Repairer();
 
     contender = new StandaloneMasterContender();
     detector = new StandaloneMasterDetector();
     master =
-      new Master(_allocator, registrar, files, contender, detector, flags);
-
+      new Master(
+        _allocator,
+        registrar,
+        repairer,
+        files,
+        contender,
+        detector,
+        flags);
     detector->appoint(master->info());
   }
 
@@ -143,6 +172,7 @@ PID<Master> launch(const Flags& flags, Allocator* _allocator)
   for (int i = 0; i < flags.num_slaves; i++) {
     slave::Flags flags;
     Try<Nothing> load = flags.load("MESOS_");
+
     if (load.isError()) {
       EXIT(1) << "Failed to start a local cluster while loading "
               << "slave flags from the environment: " << load.error();
@@ -204,11 +234,17 @@ void shutdown()
     delete registrar;
     registrar = NULL;
 
+    delete repairer;
+    repairer = NULL;
+
     delete state;
     state = NULL;
 
     delete storage;
     storage = NULL;
+
+    delete log;
+    log = NULL;
   }
 }
 

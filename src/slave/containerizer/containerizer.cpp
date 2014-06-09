@@ -32,18 +32,13 @@
 #include "slave/slave.hpp"
 
 #ifdef __linux__
-#include "slave/containerizer/cgroups_launcher.hpp"
+#include "slave/containerizer/linux_launcher.hpp"
 #endif // __linux__
 #include "slave/containerizer/containerizer.hpp"
 #include "slave/containerizer/isolator.hpp"
 #include "slave/containerizer/launcher.hpp"
 #include "slave/containerizer/mesos_containerizer.hpp"
-
-#include "slave/containerizer/isolators/posix.hpp"
-#ifdef __linux__
-#include "slave/containerizer/isolators/cgroups/cpushare.hpp"
-#include "slave/containerizer/isolators/cgroups/mem.hpp"
-#endif // __linux__
+#include "slave/containerizer/external_containerizer.hpp"
 
 using std::map;
 using std::string;
@@ -100,13 +95,11 @@ Try<Resources> Containerizer::resources(const Flags& flags)
                     << "' ; defaulting to DEFAULT_MEM";
       mem = DEFAULT_MEM;
     } else {
-      mem = mem_.get().total;
-
-      // Leave 1 GB free if we have more than 1 GB, otherwise, use all!
-      // TODO(benh): Have better default scheme (e.g., % of mem not greater
-      // than 1 GB?)
-      if (mem > Gigabytes(1)) {
-        mem = mem - Gigabytes(1);
+      Bytes total = mem_.get().total;
+      if (total >= Gigabytes(2)) {
+        mem = total - Gigabytes(1); // Leave 1GB free.
+      } else {
+        mem = Bytes(total.bytes() / 2); // Use 50% of the memory.
       }
     }
 
@@ -130,12 +123,11 @@ Try<Resources> Containerizer::resources(const Flags& flags)
                    << "' ; defaulting to " << DEFAULT_DISK;
       disk = DEFAULT_DISK;
     } else {
-      disk = disk_.get();
-      // Leave 5 GB free if we have more than 10 GB, otherwise, use all!
-      // TODO(benh): Have better default scheme (e.g., % of disk not
-      // greater than 10 GB?)
-      if (disk > Gigabytes(10)) {
-        disk = disk - Gigabytes(5);
+      Bytes total = disk_.get();
+      if (total >= Gigabytes(10)) {
+        disk = total - Gigabytes(5); // Leave 5GB free.
+      } else {
+        disk = Bytes(total.bytes() / 2); // Use 50% of the disk.
       }
     }
 
@@ -158,66 +150,20 @@ Try<Resources> Containerizer::resources(const Flags& flags)
 }
 
 
-Try<Containerizer*> Containerizer::create(
-    const Flags& flags,
-    bool local)
+Try<Containerizer*> Containerizer::create(const Flags& flags, bool local)
 {
-  string isolation;
-  if (flags.isolation == "process") {
-    LOG(WARNING) << "The 'process' isolation flag is deprecated, "
-                 << "please update your flags to"
-                 << " '--isolation=posix/cpu,posix/mem'.";
-    isolation = "posix/cpu,posix/mem";
-  } else if (flags.isolation == "cgroups") {
-    LOG(WARNING) << "The 'cgroups' isolation flag is deprecated, "
-                 << "please update your flags to"
-                 << " '--isolation=cgroups/cpu,cgroups/mem'.";
-    isolation = "cgroups/cpu,cgroups/mem";
-  } else {
-    isolation = flags.isolation;
+  if (flags.isolation == "external") {
+    return new ExternalContainerizer(flags);
   }
 
-  LOG(INFO) << "Using isolation: " << isolation;
+  Try<MesosContainerizer*> containerizer =
+    MesosContainerizer::create(flags, local);
 
-  // Create a MesosContainerizerProcess using isolators and a launcher.
-  hashmap<std::string, Try<Isolator*> (*)(const Flags&)> creators;
-
-  creators["posix/cpu"]   = &PosixCpuIsolatorProcess::create;
-  creators["posix/mem"]   = &PosixMemIsolatorProcess::create;
-#ifdef __linux__
-  creators["cgroups/cpu"] = &CgroupsCpushareIsolatorProcess::create;
-  creators["cgroups/mem"] = &CgroupsMemIsolatorProcess::create;
-#endif // __linux__
-
-  vector<Owned<Isolator> > isolators;
-
-  foreach (const string& type, strings::split(isolation, ",")) {
-    if (creators.contains(type)) {
-      Try<Isolator*> isolator = creators[type](flags);
-      if (isolator.isError()) {
-        return Error(
-            "Could not create isolator " + type + ": " + isolator.error());
-      } else {
-        isolators.push_back(Owned<Isolator>(isolator.get()));
-      }
-    } else {
-      return Error("Unknown or unsupported isolator: " + type);
-    }
+  if (containerizer.isError()) {
+    return Error(containerizer.error());
   }
 
-#ifdef __linux__
-  // Use cgroups on Linux if any cgroups isolators are used.
-  Try<Launcher*> launcher = strings::contains(isolation, "cgroups")
-    ? CgroupsLauncher::create(flags) : PosixLauncher::create(flags);
-#else
-  Try<Launcher*> launcher = PosixLauncher::create(flags);
-#endif // __linux__
-  if (launcher.isError()) {
-    return Error("Failed to create launcher: " + launcher.error());
-  }
-
-  return new MesosContainerizer(
-      flags, local, Owned<Launcher>(launcher.get()), isolators);
+  return containerizer.get();
 }
 
 
@@ -235,9 +181,26 @@ map<string, string> executorEnvironment(
   // the environment variables below in case it is included.
   env["LIBPROCESS_PORT"] = "0";
 
-  // Also add MESOS_NATIVE_LIBRARY if it's not already present (and
+  // Also add MESOS_NATIVE_JAVA_LIBRARY if it's not already present (and
   // like above, we do this before the environment variables below in
   // case the framework wants to override).
+  // TODO(tillt): Adapt library towards JNI specific name once libmesos
+  // has been split.
+  if (!os::hasenv("MESOS_NATIVE_JAVA_LIBRARY")) {
+    string path =
+#ifdef __APPLE__
+      LIBDIR "/libmesos-" VERSION ".dylib";
+#else
+      LIBDIR "/libmesos-" VERSION ".so";
+#endif
+    if (os::exists(path)) {
+      env["MESOS_NATIVE_JAVA_LIBRARY"] = path;
+    }
+  }
+
+  // Also add MESOS_NATIVE_LIBRARY if it's not already present.
+  // This environment variable is kept for offering non JVM-based
+  // frameworks a more compact and JNI independent library.
   if (!os::hasenv("MESOS_NATIVE_LIBRARY")) {
     string path =
 #ifdef __APPLE__

@@ -16,11 +16,11 @@ layout: documentation
 * A code review request should be created for every JIRA that involves a change to the codebase.
 
 ### Before you submit
-1. Check out the code from the Apache repository via Git or SVN. Instructions are on the [Getting Started](http://mesos.apache.org/gettingstarted/) page.
+1. Check out the code from the Apache repository via Git. Instructions are on the [Getting Started](http://mesos.apache.org/gettingstarted/) page.
 
 1. Join the dev@mesos.apache.org mailing list by sending an email to dev-subscribe@mesos.apache.org
 
-1. Find a JIRA that is currently unassigned that you want to work on at http://issues.apache.org/jira/browse/MESOS, or create your own (you'll need a JIRA account for this, see below)!
+1. Find a JIRA that is currently unassigned that you want to work on at [JIRA issue tracker](https://issues.apache.org/jira/browse/MESOS), or create your own (you'll need a JIRA account for this, see below)!
     2. This could be a JIRA representing a bug (possibly a bug that you encountered and reported, e.g. when trying to build) or a new feature
 
 1. Assign the JIRA to yourself. To do this, you will need:
@@ -32,7 +32,7 @@ layout: documentation
 1. Create one or more test cases to exercise the bug or the feature (the Mesos team uses [test-driven development](http://en.wikipedia.org/wiki/Test-driven_development)), before you start coding, make sure these test cases all fail.
 
 1. Make your changes to the code (using whatever IDE/editor you choose) to actually fix the bug or implement the feature.
-    2. Before beginning, please read the [Mesos C++ Style Guide](mesos-c++-style-guide.md)
+    2. Before beginning, please read the [Mesos C++ Style Guide](mesos-c++-style-guide.md). It is recommended to use the git pre-commit hook (`support/hooks/pre-commit`) to automatically check for style errors. See the hook script for instructions to enable it.
     2. Most of your changes will probably be to files inside of `BASE_MESOS_DIR`
     2. To build, we recommend that you don't build inside of the src directory. We recommend you do the following:
         3. From inside of the root Mesos directory: `mkdir build && cd build`
@@ -51,7 +51,7 @@ layout: documentation
 
 ### Submit your patch
 1. You're ready to submit your patch for review!
-	2. Log in or create an account at ]Apache Review Board](http://reviews.apache.org)
+	2. Log in or create an account at [Apache Review Board](http://reviews.apache.org)
     2. The easiest (and recommended) way to submit reviews is through `post-reviews.py` a wrapper around post-review.
 	2. First, install post-review. [See Instructions](http://www.reviewboard.org/docs/manual/dev/users/tools/post-review/)
 	2. From your local branch run `support/post-reviews.py`.

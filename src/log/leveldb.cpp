@@ -18,14 +18,19 @@
 
 #include <google/protobuf/io/zero_copy_stream_impl.h>
 
+#include <glog/logging.h>
+
 #include <leveldb/comparator.h>
 #include <leveldb/write_batch.h>
+
+#include <stdint.h>
 
 #include <stout/check.hpp>
 #include <stout/error.hpp>
 #include <stout/numify.hpp>
 #include <stout/stopwatch.hpp>
 #include <stout/strings.hpp>
+#include <stout/unreachable.hpp>
 
 #include "log/leveldb.hpp"
 
@@ -49,6 +54,7 @@ public:
     // if (left < right) return -1;
     // if (left == right) return 0;
     // if (left > right) return 1;
+    return UNREACHABLE();
   }
 
   virtual const char* Name() const

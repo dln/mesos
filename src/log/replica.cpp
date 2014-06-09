@@ -16,10 +16,9 @@
  * limitations under the License.
  */
 
-#include <algorithm>
+#include <stdint.h>
 
-#include <boost/icl/interval.hpp>
-#include <boost/icl/interval_set.hpp>
+#include <algorithm>
 
 #include <process/dispatch.hpp>
 #include <process/id.hpp>
@@ -39,13 +38,10 @@
 #include "log/replica.hpp"
 #include "log/storage.hpp"
 
-using namespace boost::icl;
-
 using namespace process;
 
 using std::list;
 using std::string;
-using std::vector;
 
 namespace mesos {
 namespace internal {
@@ -66,7 +62,7 @@ class ReplicaProcess : public ProtobufProcess<ReplicaProcess>
 public:
   // Constructs a new replica process using specified path to a
   // directory for storing the underlying log.
-  ReplicaProcess(const string& path);
+  explicit ReplicaProcess(const string& path);
 
   virtual ~ReplicaProcess();
 
@@ -88,7 +84,7 @@ public:
 
   // Returns missing positions in the log (i.e., unlearned or holes)
   // within the specified range [from, to].
-  vector<uint64_t> missing(uint64_t from, uint64_t to);
+  IntervalSet<uint64_t> missing(uint64_t from, uint64_t to);
 
   // Returns the beginning position of the log.
   uint64_t beginning();
@@ -146,10 +142,10 @@ private:
   uint64_t end;
 
   // Holes in the log.
-  interval_set<uint64_t> holes;
+  IntervalSet<uint64_t> holes;
 
   // Unlearned positions in the log.
-  interval_set<uint64_t> unlearned;
+  IntervalSet<uint64_t> unlearned;
 };
 
 
@@ -191,7 +187,7 @@ Result<Action> ReplicaProcess::read(uint64_t position)
     return Error("Attempted to read truncated position");
   } else if (end < position) {
     return None(); // These semantics are assumed above!
-  } else if (contains(holes, position)) {
+  } else if (holes.contains(position)) {
     return None();
   }
 
@@ -251,22 +247,20 @@ bool ReplicaProcess::missing(uint64_t position)
   } else if (position > end) {
     return true;
   } else {
-    if (contains(unlearned, position) || contains(holes, position)) {
-      return true;
-    } else {
-      return false;
-    }
+    return unlearned.contains(position) || holes.contains(position);
   }
 }
 
 
-vector<uint64_t> ReplicaProcess::missing(uint64_t from, uint64_t to)
+// TODO(jieyu): Allow this method to take an Interval.
+IntervalSet<uint64_t> ReplicaProcess::missing(uint64_t from, uint64_t to)
 {
   if (from > to) {
-    return vector<uint64_t>();
+    // Empty interval.
+    return IntervalSet<uint64_t>();
   }
 
-  interval_set<uint64_t> positions;
+  IntervalSet<uint64_t> positions;
 
   // Add unlearned positions.
   positions += unlearned;
@@ -276,14 +270,13 @@ vector<uint64_t> ReplicaProcess::missing(uint64_t from, uint64_t to)
 
   // Add all the unknown positions beyond our end.
   if (to > end) {
-    positions += interval<uint64_t>::closed(end + 1, to);
+    positions += (Bound<uint64_t>::open(end), Bound<uint64_t>::closed(to));
   }
 
   // Do not consider positions outside [from, to].
-  positions &= interval<uint64_t>::closed(from, to);
+  positions &= (Bound<uint64_t>::closed(from), Bound<uint64_t>::closed(to));
 
-  // Generate the resultant vector.
-  return vector<uint64_t>(elements_begin(positions), elements_end(positions));
+  return positions;
 }
 
 
@@ -571,57 +564,69 @@ void ReplicaProcess::write(const WriteRequest& request)
       response.set_position(request.position());
       reply(response);
     } else {
-      // TODO(benh): Check if this position has already been learned,
-      // and if so, check that we are re-writing the same value!
-      //
-      // TODO(jieyu): Interestingly, in the presence of truncations,
-      // we may encounter a situation where this position has already
-      // been learned, but we are re-writing a different value. For
-      // example, assume that there are 5 replicas (R1 ~ R5). First,
-      // an append operation has been agreed at position 5 by R1, R2,
-      // R3 and R4, but only R1 receives a learned message. Later, a
-      // truncate operation has been agreed at position 10 by R1, R2
-      // and R3, but only R1 receives a learned message. Now, a leader
-      // failover happens and R5 is filled with a NOP at position 5
-      // because its coordinator receives a learned NOP at position 5
-      // from R1 (because of its learned truncation at position 10).
-      // Now, another leader failover happens and R4's coordinator
-      // tries to fill position 5. However, it is only able to contact
-      // R2, R3 and R4 during the explicit promise phase. As a result,
-      // it will try to write an append operation at position 5 to R5
-      // while R5 currently have a learned NOP stored at position 5.
-      action.set_performed(request.proposal());
-      action.clear_learned();
-      if (request.has_learned()) action.set_learned(request.learned());
-      action.clear_type();
-      action.clear_nop();
-      action.clear_append();
-      action.clear_truncate();
-      action.set_type(request.type());
+      if (action.has_learned() && action.learned()) {
+        // We ignore the write request if this position has already
+        // been learned. Turns out that it is possible a replica
+        // receives the learned message of a write earlier than the
+        // write request of that write (Yes! It is possible! See
+        // MESOS-1271 for details). In that case, we want to prevent
+        // this log entry from being overwritten.
+        //
+        // TODO(benh): If the value in the write request is the same
+        // as the learned value, consider sending back an ACK which
+        // might speed convergence.
+        //
+        // NOTE: In the presence of truncations, we may encounter a
+        // situation where this position has already been learned, but
+        // we are receiving a write request for this position with a
+        // different value. For example, assume that there are 5
+        // replicas (R1 ~ R5). First, an append operation has been
+        // agreed at position 5 by R1, R2, R3 and R4, but only R1
+        // receives a learned message. Later, a truncate operation has
+        // been agreed at position 10 by R1, R2 and R3, but only R1
+        // receives a learned message. Now, a leader failover happens
+        // and R5 is filled with a NOP at position 5 because its
+        // coordinator receives a learned NOP at position 5 from R1
+        // (because of its learned truncation at position 10). Now,
+        // another leader failover happens and R4's coordinator tries
+        // to fill position 5. However, it is only able to contact R2,
+        // R3 and R4 during the explicit promise phase. Therefore, it
+        // will try to write an append operation at position 5 to R5
+        // while R5 currently have a learned NOP stored at position 5.
+      } else {
+        action.set_performed(request.proposal());
+        action.clear_learned();
+        if (request.has_learned()) action.set_learned(request.learned());
+        action.clear_type();
+        action.clear_nop();
+        action.clear_append();
+        action.clear_truncate();
+        action.set_type(request.type());
 
-      switch (request.type()) {
-        case Action::NOP:
-          CHECK(request.has_nop());
-          action.mutable_nop();
-          break;
-        case Action::APPEND:
-          CHECK(request.has_append());
-          action.mutable_append()->CopyFrom(request.append());
-          break;
-        case Action::TRUNCATE:
-          CHECK(request.has_truncate());
-          action.mutable_truncate()->CopyFrom(request.truncate());
-          break;
-        default:
-          LOG(FATAL) << "Unknown Action::Type!";
-      }
+        switch (request.type()) {
+          case Action::NOP:
+            CHECK(request.has_nop());
+            action.mutable_nop();
+            break;
+          case Action::APPEND:
+            CHECK(request.has_append());
+            action.mutable_append()->CopyFrom(request.append());
+            break;
+          case Action::TRUNCATE:
+            CHECK(request.has_truncate());
+            action.mutable_truncate()->CopyFrom(request.truncate());
+            break;
+          default:
+            LOG(FATAL) << "Unknown Action::Type!";
+        }
 
-      if (persist(action)) {
-        WriteResponse response;
-        response.set_okay(true);
-        response.set_proposal(request.proposal());
-        response.set_position(request.position());
-        reply(response);
+        if (persist(action)) {
+          WriteResponse response;
+          response.set_okay(true);
+          response.set_proposal(request.proposal());
+          response.set_position(request.position());
+          reply(response);
+        }
       }
     }
   }
@@ -676,14 +681,17 @@ bool ReplicaProcess::persist(const Action& action)
   // Update unlearned positions and deal with truncation actions.
   if (action.has_learned() && action.learned()) {
     unlearned -= action.position();
+
     if (action.has_type() && action.type() == Action::TRUNCATE) {
       // No longer consider truncated positions as holes (so that a
       // coordinator doesn't try and fill them).
-      holes -= interval<uint64_t>::open(0, action.truncate().to());
+      holes -= (Bound<uint64_t>::open(0),
+                Bound<uint64_t>::open(action.truncate().to()));
 
       // No longer consider truncated positions as unlearned (so that
       // a coordinator doesn't try and fill them).
-      unlearned -= interval<uint64_t>::open(0, action.truncate().to());
+      unlearned -= (Bound<uint64_t>::open(0),
+                    Bound<uint64_t>::open(action.truncate().to()));
 
       // And update the beginning position.
       begin = std::max(begin, action.truncate().to());
@@ -695,7 +703,8 @@ bool ReplicaProcess::persist(const Action& action)
 
   // Update holes if we just wrote many positions past the last end.
   if (action.position() > end) {
-    holes += interval<uint64_t>::open(end, action.position());
+    holes += (Bound<uint64_t>::open(end),
+              Bound<uint64_t>::open(action.position()));
   }
 
   // And update the end position.
@@ -718,14 +727,14 @@ void ReplicaProcess::restore(const string& path)
   unlearned = state.get().unlearned;
 
   // Only use the learned positions to help determine the holes.
-  const interval_set<uint64_t>& learned = state.get().learned;
+  const IntervalSet<uint64_t>& learned = state.get().learned;
 
   // Holes are those positions in [begin, end] that are not in both
   // learned and unlearned sets. In the case of a brand new log (begin
   // and end are 0, and learned and unlearned are empty), we assume
   // position 0 is a hole, and a coordinator will simply fill it with
   // a no-op when it first gets elected.
-  holes += interval<uint64_t>::closed(begin, end);
+  holes += (Bound<uint64_t>::closed(begin), Bound<uint64_t>::closed(end));
   holes -= learned;
   holes -= unlearned;
 
@@ -763,7 +772,8 @@ Future<bool> Replica::missing(uint64_t position) const
 }
 
 
-Future<vector<uint64_t> > Replica::missing(uint64_t from, uint64_t to) const
+Future<IntervalSet<uint64_t> > Replica::missing(
+    uint64_t from, uint64_t to) const
 {
   return dispatch(process, &ReplicaProcess::missing, from, to);
 }

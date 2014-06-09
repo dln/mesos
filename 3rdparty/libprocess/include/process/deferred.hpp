@@ -36,12 +36,17 @@ private:
 #define TEMPLATE(Z, N, DATA)                                            \
   template <ENUM_PARAMS(N, typename A)>                                 \
   friend Deferred<void(ENUM_PARAMS(N, A))> defer(                       \
-      const std::tr1::function<void(ENUM_PARAMS(N, A))>& f);
+      const std::tr1::function<void(ENUM_PARAMS(N, A))>& f);            \
+                                                                        \
+  template <typename R, ENUM_PARAMS(N, typename A)>                     \
+  friend Deferred<Future<R>(ENUM_PARAMS(N, A))> defer(                  \
+      const std::tr1::function<Future<R>(ENUM_PARAMS(N, A))>& f);
 
   REPEAT_FROM_TO(1, 11, TEMPLATE, _) // Args A0 -> A9.
 #undef TEMPLATE
 
-  Deferred(const std::tr1::function<F>& f) : std::tr1::function<F>(f) {}
+  /*implicit*/ Deferred(const std::tr1::function<F>& f)
+    : std::tr1::function<F>(f) {}
 };
 
 
@@ -130,7 +135,7 @@ private:
   REPEAT_FROM_TO(1, 11, TEMPLATE, _) // Args A0 -> A9.
 #undef TEMPLATE
 
-  _Defer(const std::tr1::_Bind<F>& b)
+  /*implicit*/ _Defer(const std::tr1::_Bind<F>& b)
     : std::tr1::_Bind<F>(b) {}
 };
 

@@ -4,8 +4,8 @@
 
 #include <google/protobuf/io/zero_copy_stream_impl.h> // For ArrayInputStream.
 
+#include <set>
 #include <string>
-#include <vector>
 
 #include <process/dispatch.hpp>
 #include <process/future.hpp>
@@ -27,12 +27,40 @@
 
 using namespace process;
 
+// Note that we don't add 'using std::set' here because we need
+// 'std::' to disambiguate the 'set' member.
 using std::string;
-using std::vector;
 
 namespace mesos {
 namespace internal {
 namespace state {
+
+
+class LevelDBStorageProcess : public Process<LevelDBStorageProcess>
+{
+public:
+  explicit LevelDBStorageProcess(const string& path);
+  virtual ~LevelDBStorageProcess();
+
+  virtual void initialize();
+
+  // Storage implementation.
+  Future<Option<Entry> > get(const string& name);
+  Future<bool> set(const Entry& entry, const UUID& uuid);
+  Future<bool> expunge(const Entry& entry);
+  Future<std::set<string> > names();
+
+private:
+  // Helpers for interacting with leveldb.
+  Try<Option<Entry> > read(const string& name);
+  Try<bool> write(const Entry& entry);
+
+  const string path;
+  leveldb::DB* db;
+
+  Option<string> error;
+};
+
 
 LevelDBStorageProcess::LevelDBStorageProcess(const string& _path)
   : path(_path), db(NULL) {}
@@ -61,20 +89,20 @@ void LevelDBStorageProcess::initialize()
 }
 
 
-Future<vector<string> > LevelDBStorageProcess::names()
+Future<std::set<string> > LevelDBStorageProcess::names()
 {
   if (error.isSome()) {
     return Failure(error.get());
   }
 
-  vector<string> results;
+  std::set<string> results;
 
   leveldb::Iterator* iterator = db->NewIterator(leveldb::ReadOptions());
 
   iterator->SeekToFirst();
 
   while (iterator->Valid()) {
-    results.push_back(iterator->key().ToString());
+    results.insert(iterator->key().ToString());
     iterator->Next();
   }
 
@@ -224,6 +252,45 @@ Try<bool> LevelDBStorageProcess::write(const Entry& entry)
   }
 
   return true;
+}
+
+
+LevelDBStorage::LevelDBStorage(const string& path)
+{
+  process = new LevelDBStorageProcess(path);
+  spawn(process);
+}
+
+
+LevelDBStorage::~LevelDBStorage()
+{
+  terminate(process);
+  wait(process);
+  delete process;
+}
+
+
+Future<Option<Entry> > LevelDBStorage::get(const string& name)
+{
+  return dispatch(process, &LevelDBStorageProcess::get, name);
+}
+
+
+Future<bool> LevelDBStorage::set(const Entry& entry, const UUID& uuid)
+{
+  return dispatch(process, &LevelDBStorageProcess::set, entry, uuid);
+}
+
+
+Future<bool> LevelDBStorage::expunge(const Entry& entry)
+{
+  return dispatch(process, &LevelDBStorageProcess::expunge, entry);
+}
+
+
+Future<std::set<string> > LevelDBStorage::names()
+{
+  return dispatch(process, &LevelDBStorageProcess::names);
 }
 
 } // namespace state {

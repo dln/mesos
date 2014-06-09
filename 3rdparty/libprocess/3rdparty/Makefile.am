@@ -25,6 +25,7 @@ GTEST = $(GMOCK)/gtest
 RY_HTTP_PARSER = ry-http-parser-$(RY_HTTP_PARSER_VERSION)
 LIBEV = libev-$(LIBEV_VERSION)
 PROTOBUF = protobuf-$(PROTOBUF_VERSION)
+PICOJSON = picojson-$(PICOJSON_VERSION)
 
 
 EXTRA_DIST =			\
@@ -34,7 +35,8 @@ EXTRA_DIST =			\
   $(GPERFTOOLS).tar.gz		\
   $(LIBEV).tar.gz		\
   $(PROTOBUF).tar.gz		\
-  $(RY_HTTP_PARSER).tar.gz
+  $(RY_HTTP_PARSER).tar.gz	\
+  $(PICOJSON).tar.gz
 
 # We need to patch glog in order to deal with a compilation issue when
 # compiling with clang (and C++11); see MESOS-860, MESOS-966.
@@ -52,7 +54,8 @@ CLEAN_EXTRACTED =	\
   $(GPERFTOOLS)		\
   $(LIBEV)		\
   $(PROTOBUF)		\
-  $(RY_HTTP_PARSER)
+  $(RY_HTTP_PARSER)	\
+  $(PICOJSON)
 
 
 # This is where the magic happens: we use stamp files as dependencies
@@ -63,15 +66,16 @@ CLEAN_EXTRACTED =	\
 	test ! -e $(srcdir)/$*.patch || patch -d $* -p1 <$(srcdir)/$*.patch
 	touch $@
 
+if WITH_BUNDLED_HTTP_PARSER
+  # Convenience library for Ryan Dahl's HTTP parser.
+  noinst_LTLIBRARIES = libry_http_parser.la
+  nodist_libry_http_parser_la_SOURCES = $(RY_HTTP_PARSER)/http_parser.c
+  libry_http_parser_la_CPPFLAGS = -I$(RY_HTTP_PARSER)
 
-# Convenience library for Ryan Dahl's HTTP parser.
-noinst_LTLIBRARIES = libry_http_parser.la
-nodist_libry_http_parser_la_SOURCES = $(RY_HTTP_PARSER)/http_parser.c
-libry_http_parser_la_CPPFLAGS = -I$(RY_HTTP_PARSER)
+  BUILT_SOURCES += $(nodist_libry_http_parser_la_SOURCES)
 
-# We list the sources in BUILT_SOURCES to make sure that the package
-# gets unarchived first.
-BUILT_SOURCES += $(nodist_libry_http_parser_la_SOURCES)
+  $(RY_HTTP_PARSER)/http_parser.c: $(RY_HTTP_PARSER)-stamp
+endif
 
 
 # Convenience library for gmock/gtest.
@@ -91,8 +95,6 @@ BUILT_SOURCES += $(nodist_libgmock_la_SOURCES)
 $(GMOCK)/src/gmock-all.cc: $(GMOCK)-stamp
 $(GTEST)/src/gtest-all.cc: $(GMOCK)-stamp
 
-
-$(BOOST)/boost: $(BOOST)-stamp
 
 # NOTE: We explicitely set GTEST_CONFIG=no so that we don't attempt to
 # build glog against a system installed gtest (there's no reason to
@@ -122,24 +124,26 @@ $(PROTOBUF)-build-stamp: $(PROTOBUF)-stamp
           $(MAKE) $(AM_MAKEFLAGS)
 	touch $@
 
-$(RY_HTTP_PARSER)/http_parser.c: $(RY_HTTP_PARSER)-stamp
-
-
 # Tests for stout.
 check_PROGRAMS = stout-tests
 
 stout_tests_SOURCES =				\
+  $(STOUT)/tests/base64_tests.cpp		\
   $(STOUT)/tests/bytes_tests.cpp		\
+  $(STOUT)/tests/cache_tests.cpp		\
   $(STOUT)/tests/duration_tests.cpp		\
+  $(STOUT)/tests/dynamiclibrary_tests.cpp	\
   $(STOUT)/tests/error_tests.cpp		\
   $(STOUT)/tests/flags_tests.cpp		\
   $(STOUT)/tests/gzip_tests.cpp			\
   $(STOUT)/tests/hashmap_tests.cpp		\
   $(STOUT)/tests/hashset_tests.cpp		\
+  $(STOUT)/tests/interval_tests.cpp		\
   $(STOUT)/tests/json_tests.cpp			\
   $(STOUT)/tests/linkedhashmap_tests.cpp	\
   $(STOUT)/tests/main.cpp			\
   $(STOUT)/tests/multimap_tests.cpp		\
+  $(STOUT)/tests/net_tests.cpp			\
   $(STOUT)/tests/none_tests.cpp			\
   $(STOUT)/tests/option_tests.cpp		\
   $(STOUT)/tests/os_tests.cpp			\
@@ -161,17 +165,22 @@ endif
 
 stout_tests_CPPFLAGS =				\
   -I$(srcdir)/$(STOUT)/include			\
-  -I$(BOOST)					\
   -I$(GLOG)/src					\
   -I$(GTEST)/include				\
   -I$(GMOCK)/include				\
   -I$(PROTOBUF)/src				\
+  -I$(PICOJSON)					\
   $(AM_CPPFLAGS)
+
+if WITH_BUNDLED_BOOST
+  stout_tests_CPPFLAGS += -I$(BOOST)
+endif
 
 stout_tests_LDADD =			\
   libgmock.la				\
   $(GLOG)/libglog.la			\
-  $(PROTOBUF)/src/libprotobuf.la
+  $(PROTOBUF)/src/libprotobuf.la	\
+  -ldl
 
 # We use a check-local target for now to avoid the parallel test
 # runner that ships with newer versions of autotools.
@@ -183,11 +192,15 @@ check-local: stout-tests
 # Dependencies for all-local.
 ALL_LOCAL =				\
   $(STOUT)/Makefile			\
-  $(BOOST)-stamp			\
   $(GLOG)/libglog.la			\
   $(LIBEV)/libev.la			\
   $(PROTOBUF)/src/libprotobuf.la	\
-  $(PROTOBUF)/src/protoc
+  $(PROTOBUF)/src/protoc		\
+  $(PICOJSON)-stamp
+
+if WITH_BUNDLED_BOOST
+  ALL_LOCAL += $(BOOST)-stamp
+endif
 
 if HAS_GPERFTOOLS
  ALL_LOCAL += $(GPERFTOOLS)/libprofiler.la

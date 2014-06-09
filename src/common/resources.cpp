@@ -16,6 +16,8 @@
  * limitations under the License.
  */
 
+#include <stdint.h>
+
 #include <iostream>
 #include <vector>
 
@@ -236,12 +238,12 @@ Option<Resources> Resources::find(
           if ((i == 0 && potential.role() == role) ||
               (i == 1 && potential.role() == "*" && potential.role() != role) ||
               (i == 2 && potential.role() != "*" && potential.role() != role)) {
-
             // The resources must have the same role for <= to work.
             Resource potential_ = potential;
             potential_.set_role(remaining.role());
             if (remaining <= potential_) {
-              // We can satisfy the remaining requirements for this resource type.
+              // We can satisfy the remaining requirements for this
+              // resource type.
               Resource found = remaining;
               found.set_role(potential.role());
               foundResources += found;

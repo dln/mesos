@@ -16,8 +16,11 @@
  * limitations under the License.
  */
 
+#include <stdint.h>
+
 #include <process/defer.hpp>
 #include <process/dispatch.hpp>
+#include <process/future.hpp>
 #include <process/id.hpp>
 #include <process/owned.hpp>
 #include <process/process.hpp>
@@ -52,7 +55,8 @@ public:
   LogProcess(
       size_t _quorum,
       const string& path,
-      const set<UPID>& pids);
+      const set<UPID>& pids,
+      bool _autoInitialize);
 
   LogProcess(
       size_t _quorum,
@@ -60,7 +64,8 @@ public:
       const string& servers,
       const Duration& timeout,
       const string& znode,
-      const Option<zookeeper::Authentication>& auth);
+      const Option<zookeeper::Authentication>& auth,
+      bool _autoInitialize);
 
   // Recovers the log by catching up if needed. Returns a shared
   // pointer to the local replica if the recovery succeeds.
@@ -88,6 +93,7 @@ private:
   const size_t quorum;
   Shared<Replica> replica;
   Shared<Network> network;
+  const bool autoInitialize;
 
   // For replica recovery.
   Option<Future<Owned<Replica> > > recovering;
@@ -104,7 +110,7 @@ private:
 class LogReaderProcess : public Process<LogReaderProcess>
 {
 public:
-  LogReaderProcess(Log* log);
+  explicit LogReaderProcess(Log* log);
 
   Future<Log::Position> beginning();
   Future<Log::Position> ending();
@@ -148,19 +154,20 @@ private:
 class LogWriterProcess : public Process<LogWriterProcess>
 {
 public:
-  LogWriterProcess(Log* log);
+  explicit LogWriterProcess(Log* log);
 
-  Future<Option<Log::Position> > elect();
-  Future<Log::Position> append(const string& bytes);
-  Future<Log::Position> truncate(const Log::Position& to);
+  Future<Option<Log::Position> > start();
+  Future<Option<Log::Position> > append(const string& bytes);
+  Future<Option<Log::Position> > truncate(const Log::Position& to);
 
 protected:
   virtual void initialize();
   virtual void finalize();
 
 private:
-  // Returns a position from a raw value.
-  static Log::Position position(uint64_t value);
+  // Helper for converting an optional position returned from the
+  // coordinator into a Log::Position.
+  static Option<Log::Position> position(const Option<uint64_t>& position);
 
   // Returns a future which gets set when the log recovery has
   // finished (either succeeded or failed).
@@ -169,10 +176,10 @@ private:
   // Continuations.
   void _recover();
 
-  Future<Option<Log::Position> > _elect();
-  Option<Log::Position> __elect(const Option<uint64_t>& result);
+  Future<Option<Log::Position> > _start();
+  Option<Log::Position> __start(const Option<uint64_t>& position);
 
-  void failed(const string& message);
+  void failed(const string& message, const string& reason);
 
   const size_t quorum;
   const Shared<Network> network;
@@ -193,11 +200,13 @@ private:
 LogProcess::LogProcess(
     size_t _quorum,
     const string& path,
-    const set<UPID>& pids)
+    const set<UPID>& pids,
+    bool _autoInitialize)
   : ProcessBase(ID::generate("log")),
     quorum(_quorum),
     replica(new Replica(path)),
     network(new Network(pids + (UPID) replica->pid())),
+    autoInitialize(_autoInitialize),
     group(NULL) {}
 
 
@@ -207,11 +216,18 @@ LogProcess::LogProcess(
     const string& servers,
     const Duration& timeout,
     const string& znode,
-    const Option<zookeeper::Authentication>& auth)
+    const Option<zookeeper::Authentication>& auth,
+    bool _autoInitialize)
   : ProcessBase(ID::generate("log")),
     quorum(_quorum),
     replica(new Replica(path)),
-    network(new ZooKeeperNetwork(servers, timeout, znode, auth)),
+    network(new ZooKeeperNetwork(
+        servers,
+        timeout,
+        znode,
+        auth,
+        Set<UPID>((UPID) replica->pid()))),
+    autoInitialize(_autoInitialize),
     group(new zookeeper::Group(servers, timeout, znode, auth)) {}
 
 
@@ -243,7 +259,8 @@ void LogProcess::finalize()
 {
   if (recovering.isSome()) {
     // Stop the recovery if it is still pending.
-    recovering.get().discard();
+    Future<Owned<Replica> > future = recovering.get();
+    future.discard();
   }
 
   // If there exist operations that are gated by the recovery, we fail
@@ -300,9 +317,16 @@ Future<Shared<Replica> > LogProcess::recover()
     // 'release' in Shared which will provide this CHECK internally.
     CHECK(replica.unique());
 
-    recovering = log::recover(quorum, replica.own().get(), network)
+    recovering =
+      log::recover(
+          quorum,
+          replica.own().get(),
+          network,
+          autoInitialize)
       .onAny(defer(self(), &Self::_recover));
   }
+
+  // TODO(benh): Add 'onDiscard' callback to our returned future.
 
   return promise->future();
 }
@@ -329,7 +353,8 @@ void LogProcess::_recover()
     }
     promises.clear();
   } else {
-    replica = future.get().share();
+    Owned<Replica> replica_ = future.get();
+    replica = replica_.share();
 
     // Mark the success of the recovery.
     recovered.set(Nothing());
@@ -419,6 +444,9 @@ Future<Nothing> LogReaderProcess::recover()
   // set/failed when '_recover' is called.
   process::Promise<Nothing>* promise = new process::Promise<Nothing>();
   promises.push_back(promise);
+
+  // TODO(benh): Add 'onDiscard' callback to our returned future.
+
   return promise->future();
 }
 
@@ -452,7 +480,7 @@ Future<Log::Position> LogReaderProcess::beginning()
 
 Future<Log::Position> LogReaderProcess::_beginning()
 {
-  CHECK(recovering.isReady());
+  CHECK_READY(recovering);
 
   return recovering.get()->beginning()
     .then(lambda::bind(&Self::position, lambda::_1));
@@ -467,7 +495,7 @@ Future<Log::Position> LogReaderProcess::ending()
 
 Future<Log::Position> LogReaderProcess::_ending()
 {
-  CHECK(recovering.isReady());
+  CHECK_READY(recovering);
 
   return recovering.get()->ending()
     .then(lambda::bind(&Self::position, lambda::_1));
@@ -486,7 +514,7 @@ Future<list<Log::Entry> > LogReaderProcess::_read(
     const Log::Position& from,
     const Log::Position& to)
 {
-  CHECK(recovering.isReady());
+  CHECK_READY(recovering);
 
   return recovering.get()->read(from.value, to.value)
     .then(defer(self(), &Self::__read, from, to, lambda::_1));
@@ -579,6 +607,9 @@ Future<Nothing> LogWriterProcess::recover()
   // set/failed when '_recover' is called.
   process::Promise<Nothing>* promise = new process::Promise<Nothing>();
   promises.push_back(promise);
+
+  // TODO(benh): Add 'onDiscard' callback to our returned future.
+
   return promise->future();
 }
 
@@ -604,41 +635,50 @@ void LogWriterProcess::_recover()
 }
 
 
-Future<Option<Log::Position> > LogWriterProcess::elect()
+Future<Option<Log::Position> > LogWriterProcess::start()
 {
-  return recover().then(defer(self(), &Self::_elect));
+  return recover().then(defer(self(), &Self::_start));
 }
 
 
-Future<Option<Log::Position> > LogWriterProcess::_elect()
+Future<Option<Log::Position> > LogWriterProcess::_start()
 {
   // We delete the existing coordinator (if exists) and create a new
-  // coordinator each time 'elect' is called.
+  // coordinator each time 'start' is called.
+  // TODO(benh): We shouldn't need to delete the coordinator everytime.
   delete coordinator;
   error = None();
 
-  CHECK(recovering.isReady());
+  CHECK_READY(recovering);
 
   coordinator = new Coordinator(quorum, recovering.get(), network);
 
+  LOG(INFO) << "Attempting to start the writer";
+
   return coordinator->elect()
-    .then(defer(self(), &Self::__elect, lambda::_1))
-    .onFailed(defer(self(), &Self::failed, lambda::_1));
+    .then(defer(self(), &Self::__start, lambda::_1))
+    .onFailed(defer(self(), &Self::failed, "Failed to start", lambda::_1));
 }
 
 
-Option<Log::Position> LogWriterProcess::__elect(const Option<uint64_t>& result)
+Option<Log::Position> LogWriterProcess::__start(
+    const Option<uint64_t>& position)
 {
-  if (result.isNone()) {
+  if (position.isNone()) {
+    LOG(INFO) << "Could not start the writer, but can be retried";
     return None();
-  } else {
-    return position(result.get());
   }
+
+  LOG(INFO) << "Writer started with ending position " << position.get();
+
+  return Log::Position(position.get());
 }
 
 
-Future<Log::Position> LogWriterProcess::append(const string& bytes)
+Future<Option<Log::Position> > LogWriterProcess::append(const string& bytes)
 {
+  LOG(INFO) << "Attempting to append " << bytes.size() << " bytes to the log";
+
   if (coordinator == NULL) {
     return Failure("No election has been performed");
   }
@@ -649,12 +689,15 @@ Future<Log::Position> LogWriterProcess::append(const string& bytes)
 
   return coordinator->append(bytes)
     .then(lambda::bind(&Self::position, lambda::_1))
-    .onFailed(defer(self(), &Self::failed, lambda::_1));
+    .onFailed(defer(self(), &Self::failed, "Failed to append", lambda::_1));
 }
 
 
-Future<Log::Position> LogWriterProcess::truncate(const Log::Position& to)
+Future<Option<Log::Position> > LogWriterProcess::truncate(
+    const Log::Position& to)
 {
+  LOG(INFO) << "Attempting to truncate the log to " << to.value;
+
   if (coordinator == NULL) {
     return Failure("No election has been performed");
   }
@@ -665,19 +708,24 @@ Future<Log::Position> LogWriterProcess::truncate(const Log::Position& to)
 
   return coordinator->truncate(to.value)
     .then(lambda::bind(&Self::position, lambda::_1))
-    .onFailed(defer(self(), &Self::failed, lambda::_1));
+    .onFailed(defer(self(), &Self::failed, "Failed to truncate", lambda::_1));
 }
 
 
-void LogWriterProcess::failed(const string& message)
+Option<Log::Position> LogWriterProcess::position(
+    const Option<uint64_t>& position)
 {
-  error = message;
+  if (position.isNone()) {
+    return None();
+  }
+
+  return Log::Position(position.get());
 }
 
 
-Log::Position LogWriterProcess::position(uint64_t value)
+void LogWriterProcess::failed(const string& message, const string& reason)
 {
-  return Log::Position(value);
+  error = message + ": " + reason;
 }
 
 
@@ -689,11 +737,18 @@ Log::Position LogWriterProcess::position(uint64_t value)
 Log::Log(
     int quorum,
     const string& path,
-    const set<UPID>& pids)
+    const set<UPID>& pids,
+    bool autoInitialize)
 {
   GOOGLE_PROTOBUF_VERIFY_VERSION;
 
-  process = new LogProcess(quorum, path, pids);
+  process =
+    new LogProcess(
+        quorum,
+        path,
+        pids,
+        autoInitialize);
+
   spawn(process);
 }
 
@@ -703,11 +758,21 @@ Log::Log(
     const string& servers,
     const Duration& timeout,
     const string& znode,
-    const Option<zookeeper::Authentication>& auth)
+    const Option<zookeeper::Authentication>& auth,
+    bool autoInitialize)
 {
   GOOGLE_PROTOBUF_VERIFY_VERSION;
 
-  process = new LogProcess(quorum, path, servers, timeout, znode, auth);
+  process =
+    new LogProcess(
+        quorum,
+        path,
+        servers,
+        timeout,
+        znode,
+        auth,
+        autoInitialize);
+
   spawn(process);
 }
 
@@ -740,47 +805,23 @@ Log::Reader::~Reader()
 }
 
 
-Result<list<Log::Entry> > Log::Reader::read(
+Future<list<Log::Entry> > Log::Reader::read(
     const Log::Position& from,
-    const Log::Position& to,
-    const Timeout& timeout)
+    const Log::Position& to)
 {
-  Future<list<Log::Entry> > future =
-    dispatch(process, &LogReaderProcess::read, from, to);
-
-  if (!future.await(timeout.remaining())) {
-    LOG(INFO) << "Timed out while trying to read the log";
-
-    future.discard();
-    return None();
-  } else {
-    if (!future.isReady()) {
-      string failure =
-        future.isFailed() ?
-        future.failure() :
-        "Not expecting discarded future";
-
-      LOG(ERROR) << "Failed to read the log: " << failure;
-
-      return Error(failure);
-    } else {
-      return future.get();
-    }
-  }
+  return dispatch(process, &LogReaderProcess::read, from, to);
 }
 
 
-Log::Position Log::Reader::beginning()
+Future<Log::Position> Log::Reader::beginning()
 {
-  // TODO(benh): Take a timeout and return an Option.
-  return dispatch(process, &LogReaderProcess::beginning).get();
+  return dispatch(process, &LogReaderProcess::beginning);
 }
 
 
-Log::Position Log::Reader::ending()
+Future<Log::Position> Log::Reader::ending()
 {
-  // TODO(benh): Take a timeout and return an Option.
-  return dispatch(process, &LogReaderProcess::ending).get();
+  return dispatch(process, &LogReaderProcess::ending);
 }
 
 
@@ -789,48 +830,10 @@ Log::Position Log::Reader::ending()
 /////////////////////////////////////////////////
 
 
-Log::Writer::Writer(Log* log, const Duration& timeout, int retries)
+Log::Writer::Writer(Log* log)
 {
   process = new LogWriterProcess(log);
   spawn(process);
-
-  // Trying to get elected.
-  for (;;) {
-    LOG(INFO) << "Attempting to get elected within " << timeout;
-
-    Future<Option<Log::Position> > future =
-      dispatch(process, &LogWriterProcess::elect);
-
-    if (!future.await(timeout)) {
-      LOG(INFO) << "Timed out while trying to get elected";
-
-      // Cancel the election. It is likely that the election is done
-      // right after the timeout has been reached. In that case, we
-      // may unnecessarily rerun the election, but it is safe.
-      future.discard();
-    } else {
-      if (!future.isReady()) {
-        string failure =
-          future.isFailed() ?
-          future.failure() :
-          "Not expecting discarded future";
-
-        LOG(ERROR) << "Failed to get elected: " << failure;
-        break;
-      } else if (future.get().isNone()) {
-        LOG(INFO) << "Lost an election, but can be retried";
-      } else {
-        LOG(INFO) << "Elected with current position "
-                  << future.get().get().value;
-        return;
-      }
-    }
-
-    if (--retries < 0) {
-      LOG(ERROR) << "Retry limit has been reached during election";
-      break;
-    }
-  }
 }
 
 
@@ -842,65 +845,21 @@ Log::Writer::~Writer()
 }
 
 
-Result<Log::Position> Log::Writer::append(
-    const string& data,
-    const Timeout& timeout)
+Future<Option<Log::Position> > Log::Writer::start()
 {
-  LOG(INFO) << "Attempting to append " << data.size() << " bytes to the log";
-
-  Future<Log::Position> future =
-    dispatch(process, &LogWriterProcess::append, data);
-
-  if (!future.await(timeout.remaining())) {
-    LOG(INFO) << "Timed out while trying to append the log";
-
-    future.discard();
-    return None();
-  } else {
-    if (!future.isReady()) {
-      string failure =
-        future.isFailed() ?
-        future.failure() :
-        "Not expecting discarded future";
-
-      LOG(ERROR) << "Failed to append the log: " << failure;
-
-      return Error(failure);
-    } else {
-      return future.get();
-    }
-  }
+  return dispatch(process, &LogWriterProcess::start);
 }
 
 
-Result<Log::Position> Log::Writer::truncate(
-    const Log::Position& to,
-    const Timeout& timeout)
+Future<Option<Log::Position> > Log::Writer::append(const string& data)
 {
-  LOG(INFO) << "Attempting to truncate the log to " << to.value;
+  return dispatch(process, &LogWriterProcess::append, data);
+}
 
-  Future<Log::Position> future =
-    dispatch(process, &LogWriterProcess::truncate, to);
 
-  if (!future.await(timeout.remaining())) {
-    LOG(INFO) << "Timed out while trying to truncate the log";
-
-    future.discard();
-    return None();
-  } else {
-    if (!future.isReady()) {
-      string failure =
-        future.isFailed() ?
-        future.failure() :
-        "Not expecting discarded future";
-
-      LOG(ERROR) << "Failed to truncate the log: " << failure;
-
-      return Error(failure);
-    } else {
-      return future.get();
-    }
-  }
+Future<Option<Log::Position> > Log::Writer::truncate(const Log::Position& to)
+{
+  return dispatch(process, &LogWriterProcess::truncate, to);
 }
 
 } // namespace log {

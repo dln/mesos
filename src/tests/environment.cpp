@@ -81,8 +81,12 @@ static bool enable(const ::testing::TestInfo& test)
       return false;
     }
 
-    if (strings::contains(name, "CGROUPS_") && !os::exists("/proc/cgroups")) {
+    if (strings::contains(name, "CGROUPS_")) {
+#ifdef __linux__
+      return cgroups::enabled();
+#else
       return false;
+#endif
     }
 
 #ifdef __linux__
@@ -109,14 +113,31 @@ static bool enable(const ::testing::TestInfo& test)
       return false;
     }
 #endif
+
+    // Filter out benchmark tests when we run 'make check'.
+    if (strings::contains(name, "BENCHMARK_") && !flags.benchmark) {
+      return false;
+    }
+  }
+
+  // Filter out regular tests when we run 'make bench', which
+  // requires us to check both the test case name and the test name
+  // at the same time.
+  if (flags.benchmark &&
+      !strings::contains(test.test_case_name(), "BENCHMARK_") &&
+      !strings::contains(test.name(), "BENCHMARK_")) {
+    return false;
   }
 
   // Now check the type parameter.
   if (test.type_param() != NULL) {
     const string& type = test.type_param();
-    if (strings::contains(type, "Cgroups") &&
-        (os::user() != "root" || !os::exists("/proc/cgroups"))) {
+    if (strings::contains(type, "Cgroups")) {
+#ifdef __linux__
+      return os::user() == "root" && cgroups::enabled();
+#else
       return false;
+#endif
     }
   }
 
@@ -130,7 +151,7 @@ static bool enable(const ::testing::TestInfo& test)
 // should not effect any other filters that have been put in place
 // either on the command line or via an environment variable.
 // N.B. This MUST be done _before_ invoking RUN_ALL_TESTS.
-Environment::Environment()
+Environment::Environment(const Flags& _flags) : flags(_flags)
 {
   // First we split the current filter into enabled and disabled tests
   // (which are separated by a '-').
@@ -207,15 +228,17 @@ void Environment::SetUp()
     }
   }
 
-  // Set the path to the native library for running JVM tests.
-  if (!os::hasenv("MESOS_NATIVE_LIBRARY")) {
+  // Set the path to the native JNI library for running JVM tests.
+  // TODO(tillt): Adapt library towards JNI specific name once libmesos
+  // has been split.
+  if (!os::hasenv("MESOS_NATIVE_JAVA_LIBRARY")) {
     string path = path::join(tests::flags.build_dir, "src", ".libs");
 #ifdef __APPLE__
     path = path::join(path, "libmesos-" VERSION ".dylib");
 #else
     path = path::join(path, "libmesos-" VERSION ".so");
 #endif
-    os::setenv("MESOS_NATIVE_LIBRARY", path);
+    os::setenv("MESOS_NATIVE_JAVA_LIBRARY", path);
   }
 
   if (!GTEST_IS_THREADSAFE) {

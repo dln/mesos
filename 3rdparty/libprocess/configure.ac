@@ -15,7 +15,8 @@ AC_CONFIG_MACRO_DIR([m4])
 
 # Initialize automake.
 # -Wno-portability, since we require GNU Make for % patterns.
-AM_INIT_AUTOMAKE([-Wall -Werror -Wno-portability foreign])
+# Removal of -Werror due warnings introduced by automake 1.14.
+AM_INIT_AUTOMAKE([-Wall -Wno-portability foreign])
 
 # Required for linking non-POSIX libs.
 m4_ifdef([AM_PROG_AR], [AM_PROG_AR])
@@ -63,10 +64,30 @@ AC_ARG_ENABLE([perftools],
                              [enable google perftools]),
               [gperftools=yes])
 
+AC_ARG_ENABLE([bundled],
+	      AS_HELP_STRING([--disable-bundled],
+		             [build against preinstalled dependencies instead
+		             of bundled libraries]),
+	      [enable_bundled=no], [enable_bundled=yes])
+
+AC_ARG_WITH([boost],
+	    AS_HELP_STRING([--with-boost@<:@=DIR@:>@],
+		           [excludes building and using the bundled Boost
+		           package in lieu of an installed version at a
+		           location prefixed by the given path]),
+	    [without_bundled_boost=yes], [])
+
+AC_ARG_WITH([http-parser],
+	    AS_HELP_STRING([--with-http-parser@<:@=DIR@:>@],
+			   [excludes building and using the bundled http-parser
+			   package in lieu of an installed version at a
+			   location prefixed by the given path]),
+	    [without_bundled_http_parser=yes], [])
+
 AC_ARG_WITH([zlib],
             AS_HELP_STRING([--without-zlib],
                            [disables zlib compression, which means the webui
-                            will be far less responsive; not recommended]),
+                           will be far less responsive; not recommended]),
             [], [with_zlib=yes])
 
 AC_ARG_WITH([cxx11],
@@ -81,21 +102,92 @@ case "${target_os}" in
     LIBS="$LIBS -lrt" # For clock_gettime() in stout/stopwatch.hpp.
     OS_NAME=linux # Used below for OS_LINUX.
     ;;
+  darwin*)
+    OS_NAME=darwin
+    ;;
   *)
     ;;
 esac
 
+# Include directories used by package managers (e.g., MacPorts).
+if test "x$enable_bundled" = "xno" && \
+   test "x$OS_NAME" = "xdarwin"; then
+  CPPFLAGS="$CPPFLAGS -I/opt/local/include"
+fi
 
 # Used for conditionally building source files (e.g., only want to
 # build stout/tests/proc_tests.cpp on Linux).
 AM_CONDITIONAL([OS_LINUX], [test "x$OS_NAME" = "xlinux"])
+
+if test -n "`echo $with_boost`"; then
+  CPPFLAGS="$CPPFLAGS -I${with_boost}/include"
+fi
+
+if test -n "`echo $with_http-parser`"; then
+  CPPFLAGS="$CPPFLAGS -I${with_http-parser}/include"
+fi
+
+# Check if user has asked us to use a preinstalled Boost, or if they asked
+# us to ignore all bundled libraries while compiling and linking.
+if test "x$without_bundled_boost" = "xyes" || \
+   test "x$enable_bundled" != "xyes"; then
+  # Check if headers and library were located.
+  AC_CHECK_HEADERS([boost/version.hpp], [found_boost=yes])
+
+  if test "x$found_boost" = "xyes"; then
+    with_bundled_boost=no
+  else
+    AC_MSG_ERROR([cannot find Boost
+-------------------------------------------------------------------
+You have requested the use of a non-bundled Boost but no suitable
+Boost could be found.
+
+You may want specify the location of Boost by providing a prefix
+path via --with-boost=DIR, or check that the path you provided is
+correct if you're already doing this.
+-------------------------------------------------------------------
+])
+  fi
+else
+  with_bundled_boost=yes
+fi
+
+AM_CONDITIONAL([WITH_BUNDLED_BOOST], [test "x$with_bundled_boost" = "xyes"])
+
+
+# Check if user has asked us to use a preinstalled http-parser, or if they asked
+# us to ignore all bundled libraries while compiling and linking.
+if test "x$without_bundled_http_parse" = "xyes" || \
+   test "x$enable_bundled" != "xyes"; then
+  # Check if headers and library were located.
+  AC_CHECK_HEADERS([http_parser.h], [found_http_parser=yes])
+
+  if test "x$found_http_parser" = "xyes"; then
+    with_bundled_http_parser=no
+  else
+    AC_MSG_ERROR([cannot find http-parser
+-------------------------------------------------------------------
+You have requested the use of a non-bundled http-parser but no suitable
+http-parser could be found.
+
+You may want specify the location of http-parser by providing a prefix
+path via --with-http-parser=DIR, or check that the path you provided is
+correct if you're already doing this.
+-------------------------------------------------------------------
+])
+  fi
+else
+  with_bundled_http_parser=yes
+fi
+
+AM_CONDITIONAL([WITH_BUNDLED_HTTP_PARSER],
+               [test "x$with_bundled_http_parser" = "xyes"])
 
 
 # Default to gcc toolchain (we rely on some atomic builtins for now,
 # that are also present with clang).
 AC_PROG_CXX([g++])
 AC_PROG_CC([gcc])
-
 
 # Check if we should try and enable optimizations.
 if test "x$enable_optimize" = "xyes"; then
@@ -174,11 +266,11 @@ AM_CONDITIONAL([HAS_GPERFTOOLS], [test "x$gperftools" = "xyes"])
 if test "x$with_zlib" = "xyes"; then
   AC_CHECK_LIB([z], [deflate, gzread, gzwrite, inflate], [],
                [AC_MSG_ERROR([cannot find libz
-  -------------------------------------------------------------------
-  This means HTTP responses will be slower because we cannot use
-  compression; you probably want to download and install zlib, but
-  you can get away without it by doing --without-zlib.
-  -------------------------------------------------------------------
+-------------------------------------------------------------------
+This means HTTP responses will be slower because we cannot use
+compression; you probably want to download and install zlib, but
+you can get away without it by doing --without-zlib.
+-------------------------------------------------------------------
   ])])
 fi
 
@@ -204,6 +296,13 @@ if test "x$with_cxx11" = "xyes"; then
   # Also pass the flags to 3rdparty libraries.
   CONFIGURE_ARGS="$CONFIGURE_ARGS CXXFLAGS='$CXXFLAGS'"
 fi
+
+AC_CHECK_LIB([dl], [dlopen], [AC_MSG_RESULT([found])],
+	     [AC_MSG_ERROR([cannot find libdl
+-------------------------------------------------------------------
+libdl was not found, and is required for compilation.
+-------------------------------------------------------------------
+])])
 
 
 AC_OUTPUT

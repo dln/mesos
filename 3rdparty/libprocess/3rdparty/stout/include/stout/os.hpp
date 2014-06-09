@@ -46,16 +46,17 @@
 #endif // __linux__
 #include <sys/types.h>
 #include <sys/utsname.h>
+#include <sys/wait.h>
 
 #include <list>
 #include <set>
-#include <sstream>
 #include <string>
 
 #include <stout/bytes.hpp>
 #include <stout/duration.hpp>
 #include <stout/error.hpp>
 #include <stout/foreach.hpp>
+#include <stout/hashmap.hpp>
 #include <stout/none.hpp>
 #include <stout/nothing.hpp>
 #include <stout/option.hpp>
@@ -63,6 +64,7 @@
 #include <stout/result.hpp>
 #include <stout/strings.hpp>
 #include <stout/try.hpp>
+#include <stout/unreachable.hpp>
 
 #include <stout/os/exists.hpp>
 #include <stout/os/fork.hpp>
@@ -74,9 +76,11 @@
 #ifdef __APPLE__
 #include <stout/os/osx.hpp>
 #endif // __APPLE__
+#include <stout/os/permissions.hpp>
 #include <stout/os/pstree.hpp>
 #include <stout/os/read.hpp>
 #include <stout/os/sendfile.hpp>
+#include <stout/os/shell.hpp>
 #include <stout/os/signals.hpp>
 #ifdef __APPLE__
 #include <stout/os/sysctl.hpp>
@@ -107,6 +111,25 @@ inline char** environ()
 #else
   return ::environ;
 #endif
+}
+
+
+inline hashmap<std::string, std::string> environment()
+{
+  char** environ = os::environ();
+
+  hashmap<std::string, std::string> result;
+
+  for (size_t index = 0; environ[index] != NULL; index++) {
+    std::string entry(environ[index]);
+    size_t position = entry.find_first_of('=');
+    if (position == std::string::npos) {
+      continue; // Skip malformed environment entries.
+    }
+    result[entry.substr(0, position)] = entry.substr(position + 1);
+  }
+
+  return result;
 }
 
 
@@ -274,7 +297,7 @@ inline Try<std::string> mktemp(const std::string& path = "/tmp/XXXXXX")
   int fd = ::mkstemp(::strcpy(temp, path.c_str()));
 
   if (fd < 0) {
-    delete temp;
+    delete[] temp;
     return ErrnoError();
   }
 
@@ -284,7 +307,7 @@ inline Try<std::string> mktemp(const std::string& path = "/tmp/XXXXXX")
   os::close(fd);
 
   std::string result(temp);
-  delete temp;
+  delete[] temp;
   return result;
 }
 
@@ -526,9 +549,32 @@ inline Try<Nothing> rmdir(const std::string& directory, bool recursive = true)
 }
 
 
+// Executes a command by calling "/bin/sh -c <command>", and returns
+// after the command has been completed. Returns 0 if succeeds, and
+// return -1 on error (e.g., fork/exec/waitpid failed). This function
+// is async signal safe. We return int instead of returning a Try
+// because Try involves 'new', which is not async signal safe.
 inline int system(const std::string& command)
 {
-  return ::system(command.c_str());
+  pid_t pid = ::fork();
+
+  if (pid == -1) {
+    return -1;
+  } else if (pid == 0) {
+    // In child process.
+    ::execl("/bin/sh", "sh", "-c", command.c_str(), (char*) NULL);
+    ::exit(127);
+  } else {
+    // In parent process.
+    int status;
+    while (::waitpid(pid, &status, 0) == -1) {
+      if (errno != EINTR) {
+        return -1;
+      }
+    }
+
+    return status;
+  }
 }
 
 
@@ -589,22 +635,114 @@ inline bool chdir(const std::string& directory)
 }
 
 
+inline Result<uid_t> getuid(const Option<std::string>& user = None())
+{
+  if (user.isNone()) {
+    return ::getuid();
+  }
+
+  struct passwd passwd;
+  struct passwd* result = NULL;
+
+  int size = sysconf(_SC_GETPW_R_SIZE_MAX);
+  if (size == -1) {
+    // Initial value for buffer size.
+    size = 1024;
+  }
+
+  while (true) {
+    char* buffer = new char[size];
+
+    if (getpwnam_r(user.get().c_str(), &passwd, buffer, size, &result) == 0) {
+      // getpwnam_r will return 0 but set result == NULL if the user
+      // is not found.
+      if (result == NULL) {
+        delete[] buffer;
+        return None();
+      }
+
+      uid_t uid = passwd.pw_uid;
+      delete[] buffer;
+      return uid;
+    } else {
+      if (errno != ERANGE) {
+        delete[] buffer;
+        return ErrnoError("Failed to get username information");
+      }
+      // getpwnam_r set ERANGE so try again with a larger buffer.
+      size *= 2;
+      delete[] buffer;
+    }
+  }
+
+  return Result<uid_t>(UNREACHABLE());
+}
+
+
+inline Result<gid_t> getgid(const Option<std::string>& user = None())
+{
+  if (user.isNone()) {
+    return ::getgid();
+  }
+
+  struct passwd passwd;
+  struct passwd* result = NULL;
+
+  int size = sysconf(_SC_GETPW_R_SIZE_MAX);
+  if (size == -1) {
+    // Initial value for buffer size.
+    size = 1024;
+  }
+
+  while (true) {
+    char* buffer = new char[size];
+
+    if (getpwnam_r(user.get().c_str(), &passwd, buffer, size, &result) == 0) {
+      // getpwnam_r will return 0 but set result == NULL if the user
+      // is not found.
+      if (result == NULL) {
+        delete[] buffer;
+        return None();
+      }
+
+      gid_t gid = passwd.pw_gid;
+      delete[] buffer;
+      return gid;
+    } else {
+      if (errno != ERANGE) {
+        delete[] buffer;
+        return ErrnoError("Failed to get username information");
+      }
+      // getpwnam_r set ERANGE so try again with a larger buffer.
+      size *= 2;
+      delete[] buffer;
+    }
+  }
+
+  return Result<gid_t>(UNREACHABLE());
+}
+
+
+// TODO(idownes): Refactor to return a Try and to not log internally.
 inline bool su(const std::string& user)
 {
-  passwd* passwd;
-  if ((passwd = ::getpwnam(user.c_str())) == NULL) {
-    PLOG(ERROR) << "Failed to get user information for '"
-                << user << "', getpwnam";
+  Result<gid_t> gid = os::getgid(user);
+  if (gid.isError() || gid.isNone()) {
+    LOG(ERROR) << "Failed to set gid: "
+               << (gid.isError() ? gid.error() : "unknown user");
+    return false;
+  } else if (::setgid(gid.get())) {
+    PLOG(ERROR) << "Failed to setgid";
     return false;
   }
 
-  if (::setgid(passwd->pw_gid) < 0) {
-    PLOG(ERROR) << "Failed to set group id, setgid";
+  Result<uid_t> uid = os::getuid(user);
+  if (uid.isError() || uid.isNone()) {
+    LOG(ERROR) << "Failed to set uid: "
+               << (uid.isError() ? uid.error() : "unknown user");
     return false;
-  }
-
-  if (::setuid(passwd->pw_uid) < 0) {
-    PLOG(ERROR) << "Failed to set user id, setuid";
+  } else if (::setuid(uid.get())) {
+    PLOG(ERROR) << "Failed to setuid";
     return false;
   }
 
@@ -675,14 +813,46 @@ inline Try<std::list<std::string> > find(
 }
 
 
+// TODO(idownes): Refactor to return a Result<string>, returning
+// None() and ErrnoError as appropriate rather than LOG(FATAL).
 inline std::string user()
 {
-  passwd* passwd;
-  if ((passwd = getpwuid(getuid())) == NULL) {
-    LOG(FATAL) << "Failed to get username information";
+  int size = sysconf(_SC_GETPW_R_SIZE_MAX);
+  if (size == -1) {
+    // Initial value for buffer size.
+    size = 1024;
   }
 
-  return passwd->pw_name;
+  struct passwd passwd;
+  struct passwd* result = NULL;
+
+  while (true) {
+    char* buffer = new char[size];
+
+    if (getpwuid_r(::getuid(), &passwd, buffer, size, &result) == 0) {
+      // getpwuid_r will return 0 but set result == NULL if the uid is
+      // not found.
+      if (result == NULL) {
+        delete[] buffer;
+        LOG(FATAL) << "Failed to find username for uid " << ::getuid();
+      }
+
+      std::string user(passwd.pw_name);
+      delete[] buffer;
+      return user;
+    } else {
+      if (errno != ERANGE) {
+        delete[] buffer;
+        PLOG(FATAL) << "Failed to get username information";
+      }
+
+      // getpwuid_r set ERANGE so try again with a larger buffer.
+      size *= 2;
+      delete[] buffer;
+    }
+  }
+
+  return UNREACHABLE();
 }
 
 
@@ -718,52 +888,6 @@ inline Try<std::string> hostname()
   std::string hostname = hep->h_name;
   delete[] temp;
   return hostname;
-}
-
-
-// Runs a shell command formatted with varargs and return the return value
-// of the command. Optionally, the output is returned via an argument.
-// TODO(vinod): Pass an istream object that can provide input to the command.
-inline Try<int> shell(std::ostream* os, const std::string fmt, ...)
-{
-  va_list args;
-  va_start(args, fmt);
-
-  const Try<std::string>& cmdline = strings::internal::format(fmt, args);
-
-  va_end(args);
-
-  if (cmdline.isError()) {
-    return Error(cmdline.error());
-  }
-
-  FILE* file;
-
-  if ((file = popen(cmdline.get().c_str(), "r")) == NULL) {
-    return Error("Failed to run '" + cmdline.get() + "'");
-  }
-
-  char line[1024];
-  // NOTE(vinod): Ideally the if and while loops should be interchanged. But
-  // we get a broken pipe error if we don't read the output and simply close.
-  while (fgets(line, sizeof(line), file) != NULL) {
-    if (os != NULL) {
-      *os << line ;
-    }
-  }
-
-  if (ferror(file) != 0) {
-    ErrnoError error("Error reading output of '" + cmdline.get() + "'");
-    pclose(file); // Ignoring result since we already have an error.
-    return error;
-  }
-
-  int status;
-  if ((status = pclose(file)) == -1) {
-    return Error("Failed to get status of '" + cmdline.get() + "'");
-  }
-
-  return status;
 }
 
 

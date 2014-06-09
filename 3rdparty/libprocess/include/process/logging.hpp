@@ -62,9 +62,11 @@ private:
     }
 
     if (v.get() < 0) {
-      return http::BadRequest("Invalid level '" + stringify(v.get()) + "'.\n");
+      return http::BadRequest(
+          "Invalid level '" + stringify(v.get()) + "'.\n");
     } else if (v.get() < original) {
-      return http::BadRequest("'" + stringify(v.get()) + "' < original level.\n");
+      return http::BadRequest(
+          "'" + stringify(v.get()) + "' < original level.\n");
     }
 
     Try<Duration> d = Duration::parse(duration.get());
@@ -101,6 +103,7 @@ private:
     }
   }
 
+  // TODO(dhamon): Convert to static function.
   static const std::string TOGGLE_HELP;
 
   Timeout timeout;

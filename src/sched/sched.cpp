@@ -40,8 +40,12 @@
 #include <process/dispatch.hpp>
 #include <process/id.hpp>
 #include <process/owned.hpp>
+#include <process/pid.hpp>
 #include <process/process.hpp>
 #include <process/protobuf.hpp>
+
+#include <process/metrics/gauge.hpp>
+#include <process/metrics/metrics.hpp>
 
 #include <stout/check.hpp>
 #include <stout/duration.hpp>
@@ -103,6 +107,7 @@ public:
                    pthread_mutex_t* _mutex,
                    pthread_cond_t* _cond)
     : ProcessBase(ID::generate("scheduler")),
+      metrics(*this),
       driver(_driver),
       scheduler(_scheduler),
       framework(_framework),
@@ -259,7 +264,8 @@ protected:
       // are here, making the 'discard' here a no-op. This is ok
       // because we set 'reauthenticate' here which enforces a retry
       // in '_authenticate'.
-      authenticating.get().discard();
+      Future<bool> authenticating_ = authenticating.get();
+      authenticating_.discard();
       reauthenticate = true;
       return;
     }
@@ -618,32 +624,26 @@ protected:
 
     VLOG(1) << "Scheduler::statusUpdate took " << stopwatch.elapsed();
 
-    // Acknowledge the status update.
-    // NOTE: We do a dispatch here instead of directly sending the ACK because,
-    // we want to avoid sending the ACK if the driver was aborted when we
-    // made the statusUpdate call. This works because, the 'abort' message will
-    // be enqueued before the ACK message is processed.
-    if (pid != UPID()) {
-      dispatch(self(), &Self::statusUpdateAcknowledgement, update, pid);
-    }
-  }
-
-  void statusUpdateAcknowledgement(const StatusUpdate& update, const UPID& pid)
-  {
+    // Note that we need to look at the volatile 'aborted' here to
+    // so that we don't acknowledge the update if the driver was
+    // aborted during the processing of the update.
     if (aborted) {
       VLOG(1) << "Not sending status update acknowledgment message because "
               << "the driver is aborted!";
       return;
     }
 
-    VLOG(2) << "Sending ACK for status update " << update << " to " << pid;
+    // Acknowledge the status update.
+    if (pid != UPID()) {
+      VLOG(2) << "Sending ACK for status update " << update << " to " << pid;
 
-    StatusUpdateAcknowledgementMessage message;
-    message.mutable_framework_id()->MergeFrom(framework.id());
-    message.mutable_slave_id()->MergeFrom(update.slave_id());
-    message.mutable_task_id()->MergeFrom(update.status().task_id());
-    message.set_uuid(update.uuid());
-    send(pid, message);
+      StatusUpdateAcknowledgementMessage message;
+      message.mutable_framework_id()->MergeFrom(framework.id());
+      message.mutable_slave_id()->MergeFrom(update.slave_id());
+      message.mutable_task_id()->MergeFrom(update.status().task_id());
+      message.set_uuid(update.uuid());
+      send(pid, message);
+    }
   }
 
   void lostSlave(const UPID& from, const SlaveID& slaveId)
@@ -998,6 +998,42 @@ protected:
 private:
   friend class mesos::MesosSchedulerDriver;
 
+  struct Metrics
+  {
+    Metrics(const SchedulerProcess& schedulerProcess)
+      : event_queue_size(
+          "scheduler/event_queue_size",
+          defer(schedulerProcess, &SchedulerProcess::_event_queue_size))
+    {
+      // TODO(dhamon): When we start checking the return value of 'add' we may
+      // get failures in situations where multiple SchedulerProcesses are active
+      // (ie, the fault tolerance tests). At that point we'll need MESOS-1285 to
+      // be fixed and to use self().id in the metric name.
+      process::metrics::add(event_queue_size);
+    }
+
+    ~Metrics()
+    {
+      process::metrics::remove(event_queue_size);
+    }
+
+    // Process metrics.
+    process::metrics::Gauge event_queue_size;
+  } metrics;
+
+  double _event_queue_size()
+  {
+    size_t size;
+
+    lock();
+    {
+      size = events.size();
+    }
+    unlock();
+
+    return static_cast<double>(size);
+  }
+
   MesosSchedulerDriver* driver;
   Scheduler* scheduler;
   FrameworkInfo framework;
@@ -1032,6 +1068,63 @@ private:
 } // namespace mesos {
 
 
+void MesosSchedulerDriver::initialize() {
+  GOOGLE_PROTOBUF_VERIFY_VERSION;
+
+  // Load any flags from the environment (we use local::Flags in the
+  // event we run in 'local' mode, since it inherits logging::Flags).
+  // In the future, just as the TODO in local/main.cpp discusses,
+  // we'll probably want a way to load master::Flags and slave::Flags
+  // as well.
+  local::Flags flags;
+
+  Try<Nothing> load = flags.load("MESOS_");
+
+  if (load.isError()) {
+    status = DRIVER_ABORTED;
+    scheduler->error(this, load.error());
+    return;
+  }
+
+  // Initialize libprocess.
+  process::initialize();
+
+  // TODO(benh): Replace whitespace in framework.name() with '_'?
+  logging::initialize(framework.name(), flags);
+
+  // Initialize mutex and condition variable. TODO(benh): Consider
+  // using a libprocess Latch rather than a pthread mutex and
+  // condition variable for signaling.
+  pthread_mutexattr_t attr;
+  pthread_mutexattr_init(&attr);
+  pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+  pthread_mutex_init(&mutex, &attr);
+  pthread_mutexattr_destroy(&attr);
+  pthread_cond_init(&cond, 0);
+
+  // TODO(benh): Check the user the framework wants to run tasks as,
+  // see if the current user can switch to that user, or via an
+  // authentication module ensure this is acceptable.
+
+  // See FrameWorkInfo in include/mesos/mesos.proto:
+  if (framework.user().empty()) {
+    framework.set_user(os::user());
+  }
+  if (framework.hostname().empty()) {
+    framework.set_hostname(os::hostname().get());
+  }
+
+  // Launch a local cluster if necessary.
+  Option<UPID> pid;
+  if (master == "local") {
+    pid = local::launch(flags);
+  }
+
+  CHECK(process == NULL);
+
+  url = pid.isSome() ? static_cast<string>(pid.get()) : master;
+}
+
 // Implementation of C++ API.
 //
 // Notes:
@@ -1058,57 +1151,7 @@ MesosSchedulerDriver::MesosSchedulerDriver(
     credential(NULL),
     detector(NULL)
 {
-  GOOGLE_PROTOBUF_VERIFY_VERSION;
-
-  // Load any flags from the environment (we use local::Flags in the
-  // event we run in 'local' mode, since it inherits logging::Flags).
-  // In the future, just as the TODO in local/main.cpp discusses,
-  // we'll probably want a way to load master::Flags and slave::Flags
-  // as well.
-  local::Flags flags;
-
-  Try<Nothing> load = flags.load("MESOS_");
-
-  if (load.isError()) {
-    status = DRIVER_ABORTED;
-    scheduler->error(this, load.error());
-    return;
-  }
-
-  // Initialize libprocess.
-  process::initialize();
-
-  // TODO(benh): Replace whitespace in framework.name() with '_'?
-  logging::initialize(framework.name(), flags);
-
-  // Initialize mutex and condition variable. TODO(benh): Consider
-  // using a libprocess Latch rather than a pthread mutex and
-  // condition variable for signaling.
-  pthread_mutexattr_t attr;
-  pthread_mutexattr_init(&attr);
-  pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
-  pthread_mutex_init(&mutex, &attr);
-  pthread_mutexattr_destroy(&attr);
-  pthread_cond_init(&cond, 0);
-
-  // TODO(benh): Check the user the framework wants to run tasks as,
-  // see if the current user can switch to that user, or via an
-  // authentication module ensure this is acceptable.
-
-  // If no user specified, just use the current user.
-  if (framework.user() == "") {
-    framework.set_user(os::user());
-  }
-
-  // Launch a local cluster if necessary.
-  Option<UPID> pid;
-  if (master == "local") {
-    pid = local::launch(flags);
-  }
-
-  CHECK(process == NULL);
-
-  url = pid.isSome() ? static_cast<string>(pid.get()) : master;
+  initialize();
 }
 
 
@@ -1127,57 +1170,7 @@ MesosSchedulerDriver::MesosSchedulerDriver(
     credential(new Credential(_credential)),
     detector(NULL)
 {
-  GOOGLE_PROTOBUF_VERIFY_VERSION;
-
-  // Load any flags from the environment (we use local::Flags in the
-  // event we run in 'local' mode, since it inherits logging::Flags).
-  // In the future, just as the TODO in local/main.cpp discusses,
-  // we'll probably want a way to load master::Flags and slave::Flags
-  // as well.
-  local::Flags flags;
-
-  Try<Nothing> load = flags.load("MESOS_");
-
-  if (load.isError()) {
-    status = DRIVER_ABORTED;
-    scheduler->error(this, load.error());
-    return;
-  }
-
-  // Initialize libprocess.
-  process::initialize();
-
-  // TODO(benh): Replace whitespace in framework.name() with '_'?
-  logging::initialize(framework.name(), flags);
-
-  // Initialize mutex and condition variable. TODO(benh): Consider
-  // using a libprocess Latch rather than a pthread mutex and
-  // condition variable for signaling.
-  pthread_mutexattr_t attr;
-  pthread_mutexattr_init(&attr);
-  pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
-  pthread_mutex_init(&mutex, &attr);
-  pthread_mutexattr_destroy(&attr);
-  pthread_cond_init(&cond, 0);
-
-  // TODO(benh): Check the user the framework wants to run tasks as,
-  // see if the current user can switch to that user, or via an
-  // authentication module ensure this is acceptable.
-
-  // If no user specified, just use the current user.
-  if (framework.user() == "") {
-    framework.set_user(os::user());
-  }
-
-  // Launch a local cluster if necessary.
-  Option<UPID> pid;
-  if (master == "local") {
-    pid = local::launch(flags);
-  }
-
-  CHECK(process == NULL);
-
-  url = pid.isSome() ? static_cast<string>(pid.get()) : master;
+  initialize();
 }
 
 

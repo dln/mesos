@@ -397,7 +397,8 @@ TEST_F(GarbageCollectorIntegrationTest, ExitedFramework)
     .WillOnce(FutureArg<1>(&status))
     .WillRepeatedly(Return());      // Ignore subsequent updates.
 
-  Future<Nothing> executorStarted = FUTURE_DISPATCH(_, &Slave::executorStarted);
+  Future<Nothing> executorLaunched =
+    FUTURE_DISPATCH(_, &Slave::executorLaunched);
 
   driver.start();
 
@@ -405,12 +406,12 @@ TEST_F(GarbageCollectorIntegrationTest, ExitedFramework)
   // executor. There is race where in a slave might get status updates
   // before it it notified about the start of the executor. This is
   // important in this test because if we don't wait and shutdown the
-  // framework, it might so happen that 'executorStarted' event is
+  // framework, it might so happen that 'executorLaunched' event is
   // received after the slave gets a 'shutdownFramework' leading to
   // shutdown and eventually gc of the executor and framework
   // directories. We want the gc to happen after we setup the
   // expectation on 'gc.schedule'.
-  AWAIT_READY(executorStarted);
+  AWAIT_READY(executorLaunched);
 
   AWAIT_READY(status);
 
@@ -639,6 +640,13 @@ TEST_F(GarbageCollectorIntegrationTest, DiskUsage)
   AWAIT_READY(schedule);
 
   Clock::settle(); // Wait for GarbageCollectorProcess::schedule to complete.
+
+  // We advance the clock here so that the 'removalTime' of the
+  // executor directory is definitely less than 'flags.gc_delay' in
+  // the GarbageCollectorProcess 'GarbageCollector::prune()' gets
+  // called (below). Otherwise, due to double comparison precision
+  // in 'prune()' the directory might not be deleted.
+  Clock::advance(Seconds(1));
 
   Future<Nothing> _checkDiskUsage =
     FUTURE_DISPATCH(_, &Slave::_checkDiskUsage);

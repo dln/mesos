@@ -40,6 +40,7 @@ namespace slave {
 
 using state::RunState;
 
+
 Try<Launcher*> PosixLauncher::create(const Flags& flags)
 {
   return new PosixLauncher();
@@ -81,7 +82,7 @@ Try<Nothing> PosixLauncher::recover(const list<RunState>& states)
 
 Try<pid_t> PosixLauncher::fork(
     const ContainerID& containerId,
-    const lambda::function<int()>& inChild)
+    const lambda::function<int()>& childFunction)
 {
   if (pids.contains(containerId)) {
     return Error("Process has already been forked for container " +
@@ -107,13 +108,9 @@ Try<pid_t> PosixLauncher::fork(
     }
 
     // This function should exec() and therefore not return.
-    inChild();
+    childFunction();
 
-    const char* message = "Child failed to exec";
-    while (write(STDERR_FILENO, message, strlen(message)) == -1 &&
-        errno == EINTR);
-
-    _exit(1);
+    ABORT("Child failed to exec");
   }
 
   // parent.
@@ -126,15 +123,8 @@ Try<pid_t> PosixLauncher::fork(
 }
 
 
-Future<Nothing> _destroy(const Future<Option<int> >& future)
-{
-  if (future.isReady()) {
-    return Nothing();
-  } else {
-    return Failure("Failed to kill all processes: " +
-                   (future.isFailed() ? future.failure() : "unknown error"));
-  }
-}
+// Forward declaration.
+Future<Nothing> _destroy(const Future<Option<int> >& future);
 
 
 Future<Nothing> PosixLauncher::destroy(const ContainerID& containerId)
@@ -155,6 +145,17 @@ Future<Nothing> PosixLauncher::destroy(const ContainerID& containerId)
   // completing destroy until we're sure it has been reaped.
   return process::reap(pid)
     .then(lambda::bind(&_destroy, lambda::_1));
+}
+
+
+Future<Nothing> _destroy(const Future<Option<int> >& future)
+{
+  if (future.isReady()) {
+    return Nothing();
+  } else {
+    return Failure("Failed to kill all processes: " +
+                   (future.isFailed() ? future.failure() : "unknown error"));
+  }
 }
 
 

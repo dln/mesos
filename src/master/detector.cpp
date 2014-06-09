@@ -60,12 +60,13 @@ class StandaloneMasterDetectorProcess
 {
 public:
   StandaloneMasterDetectorProcess() {}
-  StandaloneMasterDetectorProcess(const MasterInfo& _leader)
+  explicit StandaloneMasterDetectorProcess(const MasterInfo& _leader)
     : leader(_leader) {}
   ~StandaloneMasterDetectorProcess();
 
   void appoint(const Option<MasterInfo>& leader);
-  Future<Option<MasterInfo> > detect(const Option<MasterInfo>& previous = None());
+  Future<Option<MasterInfo> > detect(
+      const Option<MasterInfo>& previous = None());
 
 private:
   Option<MasterInfo> leader; // The appointed master.
@@ -77,8 +78,8 @@ class ZooKeeperMasterDetectorProcess
   : public Process<ZooKeeperMasterDetectorProcess>
 {
 public:
-  ZooKeeperMasterDetectorProcess(const URL& url);
-  ZooKeeperMasterDetectorProcess(Owned<Group> group);
+  explicit ZooKeeperMasterDetectorProcess(const URL& url);
+  explicit ZooKeeperMasterDetectorProcess(Owned<Group> group);
   ~ZooKeeperMasterDetectorProcess();
 
   virtual void initialize();
@@ -110,10 +111,10 @@ Try<MasterDetector*> MasterDetector::create(const string& master)
   } else if (master.find("zk://") == 0) {
     Try<URL> url = URL::parse(master);
     if (url.isError()) {
-      return Try<MasterDetector*>::error(url.error());
+      return Error(url.error());
     }
     if (url.get().path == "/") {
-      return Try<MasterDetector*>::error(
+      return Error(
           "Expecting a (chroot) path for ZooKeeper ('/' is not supported)");
     }
     return new ZooKeeperMasterDetector(url.get());
@@ -133,8 +134,7 @@ Try<MasterDetector*> MasterDetector::create(const string& master)
     : UPID("master@" + master);
 
   if (!pid) {
-    return Try<MasterDetector*>::error(
-        "Failed to parse '" + master + "'");
+    return Error("Failed to parse '" + master + "'");
   }
 
   return new StandaloneMasterDetector(protobuf::createMasterInfo(pid));
@@ -147,7 +147,7 @@ MasterDetector::~MasterDetector() {}
 StandaloneMasterDetectorProcess::~StandaloneMasterDetectorProcess()
 {
   foreach (Promise<Option<MasterInfo> >* promise, promises) {
-    promise->future().discard();
+    promise->discard();
     delete promise;
   }
   promises.clear();
@@ -253,7 +253,7 @@ ZooKeeperMasterDetectorProcess::ZooKeeperMasterDetectorProcess(
 ZooKeeperMasterDetectorProcess::~ZooKeeperMasterDetectorProcess()
 {
   foreach (Promise<Option<MasterInfo> >* promise, promises) {
-    promise->future().discard();
+    promise->discard();
     delete promise;
   }
   promises.clear();

@@ -102,7 +102,8 @@ TEST_F(MasterContenderDetectorTest, File)
 
   ASSERT_SOME(detector);
 
-  StartSlave(Owned<MasterDetector>(detector.get()), flags);
+  Try<PID<Slave> > slave = StartSlave(detector.get(), flags);
+  ASSERT_SOME(slave);
 
   MockScheduler sched;
   MesosSchedulerDriver driver(
@@ -123,6 +124,8 @@ TEST_F(MasterContenderDetectorTest, File)
   driver.join();
 
   Shutdown();
+
+  delete detector.get();
 }
 
 
@@ -365,7 +368,7 @@ TEST_F(ZooKeeperMasterContenderDetectorTest, NonRetryableFrrors)
 
   // Creator of the base path restricts the all accesses to be
   // itself.
-  ACL onlyCreatorCanAccess[] = {{ ZOO_PERM_ALL, ZOO_AUTH_IDS }};
+  ::ACL onlyCreatorCanAccess[] = {{ ZOO_PERM_ALL, ZOO_AUTH_IDS }};
   authenticatedZk.create("/test",
                          "42",
                          (ACL_vector) {1, onlyCreatorCanAccess},

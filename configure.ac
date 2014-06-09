@@ -18,7 +18,7 @@
 # Process this file with autoconf to produce a configure script.
 
 AC_PREREQ([2.61])
-AC_INIT([mesos], [0.18.2])
+AC_INIT([mesos], [0.19.0])
 
 # Have autoconf setup some variables related to the system.
 AC_CANONICAL_HOST
@@ -31,7 +31,8 @@ AC_CONFIG_MACRO_DIR([m4])
 
 # Initialize automake.
 # -Wno-portability, since we require GNU Make for % patterns
-AM_INIT_AUTOMAKE([-Wall -Werror -Wno-portability foreign])
+# Removal of -Werror due warnings introduced by automake 1.14.
+AM_INIT_AUTOMAKE([-Wall -Wno-portability foreign])
 
 # This is required for linking non-POSIX libs.
 m4_ifdef([AM_PROG_AR], [AM_PROG_AR])
@@ -76,7 +77,7 @@ AC_CONFIG_COMMANDS_POST([ac_configure_args="$ac_configure_args_post"])
 
 AC_CONFIG_SUBDIRS([3rdparty/libprocess])
 
-AC_CONFIG_FILES([Makefile])
+AC_CONFIG_FILES([Makefile mesos.pc])
 AC_CONFIG_FILES([ec2/Makefile])
 AC_CONFIG_FILES([src/Makefile])
 AC_CONFIG_FILES([3rdparty/Makefile])
@@ -95,10 +96,18 @@ AC_CONFIG_FILES([bin/gdb-mesos-master.sh], [chmod +x bin/gdb-mesos-master.sh])
 AC_CONFIG_FILES([bin/gdb-mesos-slave.sh], [chmod +x bin/gdb-mesos-slave.sh])
 AC_CONFIG_FILES([bin/gdb-mesos-tests.sh], [chmod +x bin/gdb-mesos-tests.sh])
 AC_CONFIG_FILES([bin/lldb-mesos-local.sh], [chmod +x bin/lldb-mesos-local.sh])
-AC_CONFIG_FILES([bin/lldb-mesos-master.sh], [chmod +x bin/lldb-mesos-master.sh])
+AC_CONFIG_FILES([bin/lldb-mesos-master.sh],
+		[chmod +x bin/lldb-mesos-master.sh])
 AC_CONFIG_FILES([bin/lldb-mesos-slave.sh], [chmod +x bin/lldb-mesos-slave.sh])
 AC_CONFIG_FILES([bin/lldb-mesos-tests.sh], [chmod +x bin/lldb-mesos-tests.sh])
-
+AC_CONFIG_FILES([bin/valgrind-mesos-local.sh],
+		[chmod +x bin/valgrind-mesos-local.sh])
+AC_CONFIG_FILES([bin/valgrind-mesos-slave.sh],
+		[chmod +x bin/valgrind-mesos-slave.sh])
+AC_CONFIG_FILES([bin/valgrind-mesos-master.sh],
+		[chmod +x bin/valgrind-mesos-master.sh])
+AC_CONFIG_FILES([bin/valgrind-mesos-tests.sh],
+		[chmod +x bin/valgrind-mesos-tests.sh])
 AC_CONFIG_FILES([src/deploy/mesos-daemon.sh])
 AC_CONFIG_FILES([src/deploy/mesos-start-cluster.sh])
 AC_CONFIG_FILES([src/deploy/mesos-start-masters.sh])
@@ -129,19 +138,35 @@ AC_ARG_ENABLE([optimize],
                              [don't try to compile with optimizations]),
               [], [enable_optimize=yes])
 
-AC_ARG_WITH([included-zookeeper],
-            AS_HELP_STRING([--without-included-zookeeper],
-                           [excludes building and using the included ZooKeeper
-                           package in lieu of a system installed version (note,
-                           however, that no attempt is made to find the package
-                           and explicitly setting CPPFLAGS and LDFLAGS as
-                           appropriate may be necessary)]),
-             [], [with_included_zookeeper=yes])
+AC_ARG_ENABLE([bundled],
+	      AS_HELP_STRING([--disable-bundled],
+			     [build against preinstalled dependencies instead
+			     of bundled libraries]),
+	      [enable_bundled=no], [enable_bundled=yes])
+
+AC_ARG_WITH([zookeeper],
+	    AS_HELP_STRING([--with-zookeeper@<:@=DIR@:>@],
+			   [excludes building and using the bundled ZooKeeper
+			   package in lieu of an installed version at a
+			   location prefixed by the given path]),
+	    [without_bundled_zookeeper=yes], [])
+
+AC_ARG_WITH([leveldb],
+	    AS_HELP_STRING([--with-leveldb@<:@=DIR@:>@],
+			   [excludes building and using the bundled LevelDB
+			   package in lieu of an installed version at a
+			   location prefixed by the given path]),
+	    [without_bundled_leveldb=yes], [])
 
 AC_ARG_WITH([cxx11],
-            AS_HELP_STRING([--without-cxx11],
+	    AS_HELP_STRING([--without-cxx11],
                            [builds Mesos without C++11 support (deprecated)]),
             [], [with_cxx11=yes])
+
+AC_ARG_WITH([network-isolator],
+            AS_HELP_STRING([--with-network-isolator],
+                           [builds the network isolator]),
+            [], [with_network_isolator=no])
 
 # TODO(benh): Support --without-included-protobuf,
 # --without-included-glog, etc. Doing this for protobuf is
@@ -153,7 +178,9 @@ AC_ARG_VAR([JAVA_HOME], [location of Java Development Kit (JDK)])
 
 AC_ARG_VAR([JAVA_CPPFLAGS], [preprocessor flags for JNI])
 
-AC_ARG_VAR([JAVA_LDFLAGS], [linker flags for JNI])
+AC_ARG_VAR([JAVA_JVM_LIBRARY], [full path to libjvm.so])
+
+AC_ARG_VAR([MAVEN_HOME], [looks for mvn at MAVEN_HOME/bin/mvn])
 
 AC_ARG_VAR([PYTHON], [which Python interpreter to use])
 
@@ -190,6 +217,88 @@ if test "x$enable_optimize" = "xyes"; then
   fi
 fi
 
+
+# Attempt to use preinstalled dependencies instead of the bundled versions in
+# cases where the user specified their location (--with-XXX=DIR) or asked us
+# to attempt to detect them (--disable-bundled).
+
+# Check if LevelDB prefix path was supplied and if so, add it to
+# CPPFLAGS while extending it by /include and to LDFLAGS while
+# extending it by /lib.
+if test -n "`echo $with_leveldb`"; then
+  CPPFLAGS="$CPPFLAGS -I${with_leveldb}/include"
+  LDFLAGS="$LDFLAGS -L${with_leveldb}/lib"
+fi
+
+# Check if ZooKeeper prefix path was supplied and if so, add it to
+# CPPFLAGS while extending it by /include and to LDFLAGS while
+# extending it by /lib.
+if test -n "`echo $with_zookeeper`"; then
+  CPPFLAGS="$CPPFLAGS -I${with_zookeeper}/include"
+  LDFLAGS="$LDFLAGS -L${with_zookeeper}/lib"
+elif test "x$enable_bundled" = "xno"; then
+  CPPFLAGS="$CPPFLAGS -I/usr/include/zookeeper"
+fi
+
+# Check if user has asked us to use a preinstalled LevelDB, or if they asked
+# us to ignore all bundled libraries while compiling and linking.
+if test "x$without_bundled_leveldb" = "xyes" || \
+   test "x$enable_bundled" != "xyes"; then
+  # Check if headers and library were located.
+  AC_CHECK_HEADERS([leveldb/db.h],
+                   [AC_CHECK_LIB([leveldb],
+                                 [leveldb_open],
+                                 [found_leveldb=yes])])
+  if test "x$found_leveldb" = "xyes"; then
+    with_bundled_leveldb=no
+  else
+    AC_MSG_ERROR([cannot find LevelDB
+-------------------------------------------------------------------
+You have requested the use of a non-bundled LevelDB but no suitable
+LevelDB could be found.
+
+You may want specify the location of LevelDB by providing a prefix
+path via --with-leveldb=DIR, or check that the path you provided is
+correct if you're already doing this.
+-------------------------------------------------------------------
+])
+  fi
+else
+  with_bundled_leveldb=yes
+fi
+
+AM_CONDITIONAL([WITH_BUNDLED_LEVELDB],
+	       [test "x$with_bundled_leveldb" = "xyes"])
+
+# Check if user has asked us to use a preinstalled ZooKeeper or if they asked
+# us to ignore all bundled libraries while compiling and linking.
+if test "x$without_bundled_zookeeper" = "xyes" || \
+   test "x$enable_bundled" != "xyes"; then
+  # Check if headers and library were located.
+  AC_CHECK_HEADERS([zookeeper.h],
+                   [AC_CHECK_LIB([zookeeper_mt],
+				 [zookeeper_init],
+				 [found_zookeeper=yes])])
+  if test "x$found_zookeeper" = "xyes"; then
+    with_bundled_zookeeper=no
+  else
+    AC_MSG_ERROR([cannot find ZooKeeper
+-------------------------------------------------------------------
+You have requested the use of a non-bundled ZooKeeper but no suitable
+ZooKeeper could be found.
+
+You may want specify the location of ZooKeeper by providing a prefix
+path via --with-zookeeper=DIR, or check that the path you provided is
+correct if you're already doing this
+-------------------------------------------------------------------
+])
+  fi
+else
+  with_bundled_zookeeper=yes
+fi
+
+AM_CONDITIONAL([WITH_BUNDLED_ZOOKEEPER],
+               [test "x$with_bundled_zookeeper" = "xyes"])
 
 # Check if we're using clang.
 AC_MSG_CHECKING([if compiling with clang])
@@ -272,7 +381,8 @@ AC_CHECK_LIB(unwind, backtrace, LIBS="$LIBS -lunwind")
 # sure variable dependencies are handled appropriately).
 
 # A helper for checking whether we can compile and link using JNI with
-# the current JAVA_CPPFLAGS and JAVA_LDFLAGS.
+# the current JAVA_CPPFLAGS (and JAVA_TEST_LDFLAGS which we setup
+# ourselves below).
 # TRY_LINK_JNI([ACTION-SUCCESS], [ACTION-FAILURE])
 AC_DEFUN([TRY_LINK_JNI], [
   cat <<__EOF__ >conftest.cpp [
@@ -288,7 +398,7 @@ __EOF__
 
   # Try to compile and link via libtool (the one we generate).
   ./libtool --tag=CXX --mode=link $CXX -Wall -Werror $JAVA_CPPFLAGS \
-    -o conftest conftest.cpp $JAVA_LDFLAGS >&5
+    -o conftest conftest.cpp $JAVA_TEST_LDFLAGS >&5
 
   if test $? != 0; then
     rm -f conftest # Cleanup after ourselves.
@@ -353,23 +463,23 @@ __EOF__
   fi
 
   # Determine linker flags for Java if not set.
-  if test -z "$JAVA_LDFLAGS"; then
-    if test "$OS_NAME" = "darwin"; then
-      JAVA_LDFLAGS="-framework JavaVM"
-    elif test "$OS_NAME" = "linux"; then
-      JAVA_LDFLAGS=""
-      for arch in amd64 i386; do
-        dir="$JAVA_HOME/jre/lib/$arch/server"
-        if test -e "$dir"; then
-          # Note that these are libtool specific flags.
-          JAVA_LDFLAGS="-L$dir -R$dir -Wl,-ljvm"
-          break;
-          fi
-      done
-    fi
+  if test "$OS_NAME" = "darwin"; then
+    dir="$JAVA_HOME/jre/lib/server"
+    JAVA_TEST_LDFLAGS="-framework JavaVM"
+    JAVA_JVM_LIBRARY=$dir/libjvm.dylib
+  elif test "$OS_NAME" = "linux"; then
+    for arch in amd64 i386; do
+      dir="$JAVA_HOME/jre/lib/$arch/server"
+      if test -e "$dir"; then
+	# Note that these are libtool specific flags.
+	JAVA_TEST_LDFLAGS="-L$dir -R$dir -Wl,-ljvm"
+	JAVA_JVM_LIBRARY=$dir/libjvm.so
+	break;
+      fi
+    done
   fi
 
-  if test -z "$JAVA_LDFLAGS"; then
+  if test -z "$JAVA_TEST_LDFLAGS"; then
     AC_MSG_ERROR([failed to determine linker flags for using Java \
 (bad JAVA_HOME or missing support for your architecture?)])
   fi
@@ -420,6 +530,8 @@ __EOF__
                   [chmod +x src/examples/java/test-framework])
   AC_CONFIG_FILES([src/examples/java/test-multiple-executors-framework],
                   [chmod +x src/examples/java/test-multiple-executors-framework])
+  AC_CONFIG_FILES([src/examples/java/test-log],
+                  [chmod +x src/examples/java/test-log])
   AC_CONFIG_FILES([src/java/mesos.pom])
 
   AC_DEFINE([MESOS_HAS_JAVA])
@@ -427,9 +539,18 @@ __EOF__
   has_java=yes
 
   # Test for Maven so we can build the jar.
-  AC_CHECK_PROG(MVN_CHECK, mvn, yes)
-  if test x"$MVN_CHECK" != x"yes"; then
-    AC_MSG_ERROR([Unable to find mvn on your path.])
+  if test -z "$MAVEN_HOME"; then
+    AC_PATH_PROG([MVN], [mvn], [$MVN])
+
+    if test "x$MVN" = "x"; then
+      AC_MSG_ERROR([can not find mvn on your path])
+    fi
+  else
+    AC_PATH_PROGS([MVN], [mvn], [$MVN], [$MAVEN_HOME/bin])
+
+    if test "x$MVN" = "x"; then
+      AC_MSG_ERROR([can not find mvn inside $MAVEN_HOME/bin])
+    fi
   fi
 fi
 
@@ -461,11 +582,11 @@ if test "x$enable_python" = "xyes"; then
   # PYTHON is not set (necessary to run our examples).
   AM_PATH_PYTHON([2.6],,
                  [AC_MSG_ERROR([mesos requires Python >= 2.6
-  -------------------------------------------------------------------
-  If you already have Python 2.6 installed (and it's on the path),
-  you might want to check if you have the PYTHON environment variable
-  set to an older version of Python.
-  -------------------------------------------------------------------
+-------------------------------------------------------------------
+If you already have Python 2.6 installed (and it's on the path),
+you might want to check if you have the PYTHON environment variable
+set to an older version of Python.
+-------------------------------------------------------------------
   ])])
 
   # Next we ensure we have the Python development libraries.
@@ -586,6 +707,8 @@ There are two possible workarounds for this issue:
                   [chmod +x src/examples/python/test-executor])
   AC_CONFIG_FILES([src/examples/python/test-framework],
                   [chmod +x src/examples/python/test-framework])
+  AC_CONFIG_FILES([src/examples/python/test-containerizer],
+                  [chmod +x src/examples/python/test-containerizer])
   AC_CONFIG_FILES([src/python/setup.py])
 
   # When clang is being used, make sure that the distutils python-
@@ -593,6 +716,7 @@ There are two possible workarounds for this issue:
   # TODO(tillt): Remove this once Apple distributed an updated Python.
   PYTHON_CFLAGS="$CFLAGS"
   PYTHON_CPPFLAGS="$CPPFLAGS"
+  PYTHON_LDFLAGS="$LDFLAGS"
 
   AS_IF([test "x$CLANG" = "xyes"],
 	[PYTHON_CFLAGS="$PYTHON_CFLAGS -Qunused-arguments"
@@ -605,6 +729,12 @@ There are two possible workarounds for this issue:
   AC_SUBST([PYTHON]) # Used by the example shell scripts and src/Makefile.am.
 
   AC_DEFINE([MESOS_HAS_PYTHON])
+
+  AC_PYTHON_MODULE([boto], [no],
+		   AC_MSG_WARN([can not find python-boto
+-------------------------------------------------------------------
+mesos-ec2 services will not function.
+-------------------------------------------------------------------]))
 
   has_python=yes
 fi
@@ -624,10 +754,6 @@ AC_CHECK_LIB([curl], [curl_global_init], [],
 libcurl is required for mesos to build.
 -------------------------------------------------------------------
 ])])
-
-
-AM_CONDITIONAL([WITH_INCLUDED_ZOOKEEPER],
-               [test "x$with_included_zookeeper" = "xyes"])
 
 
 # Check if we should/can build with C++11.
@@ -662,6 +788,46 @@ AC_CHECK_LIB([sasl2], [sasl_done], [],
 We need libsasl2 for authentication!
 -------------------------------------------------------------------
 ])])
+
+
+# Perform necessary configuration for network isolator.
+if test "x$with_network_isolator" = "xyes"; then
+  # Check for OS support.
+  AS_IF([test "$OS_NAME" = "linux"],
+        [],
+        [AC_MSG_ERROR([cannot build network isolator
+-------------------------------------------------------------------
+Network isolator is only supported on Linux!
+-------------------------------------------------------------------
+        ])])
+
+  # Check for libnl.
+  AC_CHECK_LIB([nl-3], [nl_connect], [],
+               [AC_MSG_ERROR([cannot find libnl-3
+-------------------------------------------------------------------
+We need libnl-3 for network isolator!
+-------------------------------------------------------------------
+  ])])
+
+  AC_CHECK_LIB([nl-route-3], [rtnl_cls_alloc], [],
+               [AC_MSG_ERROR([cannot find libnl-route-3
+-------------------------------------------------------------------
+We need libnl-route-3 for network isolator!
+-------------------------------------------------------------------
+  ])])
+
+  # TODO(jieyu): Automatically detect the location where the libnl
+  # headers are installed.
+  LIBNL_CFLAGS=-I/usr/include/libnl3
+
+  AC_SUBST([LIBNL_CFLAGS])
+
+  AC_DEFINE([WITH_NETWORK_ISOLATOR])
+fi
+
+
+AM_CONDITIONAL([WITH_NETWORK_ISOLATOR],
+               [test "x$with_network_isolator" = "xyes"])
 
 
 AM_CONDITIONAL([GIT_REPO], [test -d ${srcdir}"/.git"])
