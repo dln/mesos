@@ -1,0 +1,119 @@
+mesos (0.20.1-1magine1) precise; urgency=low
+
+  * Update to 0.20.1
+
+ -- Daniel Lundin <dln@eintr.org>  Fri, 10 Oct 2014 12:08:29 +0200
+
+mesos (0.19.0-1magine1) precise; urgency=low
+
+  * Update to 0.19.0
+
+ -- Daniel Lundin <dln@eintr.org>  Tue, 17 Jun 2014 13:05:38 +0200
+
+mesos (0.19.0~rc3-1magine1) precise; urgency=low
+
+  * Update to 0.19.0~rc3
+
+ -- Daniel Lundin <dln@magine.com>  Mon, 09 Jun 2014 13:35:54 +0200
+
+mesos (0.18.2-1magine1) precise; urgency=low
+
+  * Update to 0.18.2
+
+ -- Daniel Lundin <dln@magine.com>  Tue, 03 Jun 2014 14:20:11 +0200
+
+mesos (0.18.0-1magine1) precise; urgency=low
+
+  * Update to 0.18.0
+
+ -- Daniel Lundin <dln@magine.com>  Tue, 15 Apr 2014 17:55:12 +0200
+
+mesos (0.18.0~rc6-1magine1) precise; urgency=low
+
+  * Update to 0.18.0-rc6
+
+ -- Daniel Lundin <dln@magine.com>  Fri, 04 Apr 2014 11:24:30 +0200
+
+mesos (0.18.0~rc5-1magine1) precise; urgency=low
+
+  * Update to 0.18.0-rc5
+
+ -- Daniel Lundin <dln@magine.com>  Wed, 26 Mar 2014 17:00:13 +0100
+
+mesos (0.18.0~rc4-1magine1) precise; urgency=low
+
+  * Update to 0.18.0-rc4
+
+ -- Daniel Lundin <dln@magine.com>  Wed, 19 Mar 2014 11:15:30 +0100
+
+mesos (0.18.0~rc3-1magine4) precise; urgency=low
+
+  * add python-mesos deps to mesos-bin
+
+ -- Daniel Lundin <dln@magine.com>  Sun, 16 Mar 2014 21:58:13 +0100
+
+mesos (0.18.0~rc3-1magine3) precise; urgency=low
+
+  * python-mesos: link with libsnappy
+
+ -- Daniel Lundin <dln@magine.com>  Sun, 16 Mar 2014 21:31:46 +0100
+
+mesos (0.18.0~rc3-1magine2) precise; urgency=low
+
+  * Update protobuf deps to >= 2.5.0
+
+ -- Daniel Lundin <dln@magine.com>  Sun, 16 Mar 2014 19:51:21 +0100
+
+mesos (0.18.0~rc3-1magine1) precise; urgency=low
+
+  * Update to 0.18.0-rc3
+
+ -- Daniel Lundin <dln@magine.com>  Sun, 16 Mar 2014 12:11:28 +0100
+
+mesos (0.16.0-1magine1) precise; urgency=low
+
+  * Update to 0.16.0
+
+ -- Daniel Lundin <dln@magine.com>  Sun, 09 Feb 2014 17:56:10 +0100
+
+mesos (0.15.0~rc4-1magine1) precise; urgency=low
+
+  * Update to 0.15.0-rc4
+
+ -- Daniel Lundin <dln@magine.com>  Mon, 09 Dec 2013 22:45:13 +0100
+
+mesos (0.15.0~rc3-1magine1) precise; urgency=low
+
+  * Update to 0.15.0-rc3
+
+ -- Daniel Lundin <dln@magine.com>  Sat, 07 Dec 2013 21:46:39 +0100
+
+mesos (0.14.2~rc2-1ubuntu1) precise; urgency=low
+
+  * Update to 0.14.2-rc2
+
+ -- Daniel Lundin <dln@magine.com>  Thu, 07 Nov 2013 15:00:49 +0100
+
+mesos (0.14.0~rc3-1) precise; urgency=low
+
+  * Update to 0.14.0-rc3
+
+ -- Daniel Lundin <dln@magine.com>  Sat, 07 Sep 2013 21:26:26 +0200
+
+mesos (0.14.0~rc2-1) precise; urgency=low
+
+  * Update to 0.14.0-rc2
+
+ -- Daniel Lundin <dln@magine.com>  Fri, 30 Aug 2013 20:02:21 +0200
+
+mesos (0.13.0~rc7-1) precise; urgency=low
+
+  * Update to 0.13.0-rc7
+
+ -- Daniel Lundin <dln@magine.com>  Mon, 26 Aug 2013 13:52:38 +0200
+
+mesos (0.12.0-1) unstable; urgency=low
+
+  * Initial package.
+
+ -- Daniel Lundin <dln@eintr.org>  Thu, 11 Jul 2013 15:20:25 +0200

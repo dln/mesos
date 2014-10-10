@@ -1,0 +1,11 @@
+export MESOS_port=5050
+export MESOS_log_dir=/var/log/mesos/master
+export MESOS_quiet=true
+
+#export MESOS_ip=$HOST
+#export MESOS_zk=zk://localhost:2181/mycluster
+
+# See http://google-glog.googlecode.com/svn/trunk/doc/glog.html#flags
+export GLOG_minloglevel=0  # 0=INFO, 1=WARNING, 2=ERROR, 3=FATAL
+export GLOG_v=0            # Show all VLOG(m) messages where m <= GLOG_v
+export GLOG_vmodule=""     # Per-module verbose level
